@@ -39,12 +39,11 @@
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
 
-#include <unordered_set>
-
 #include <algorithm>
 #include <cmath>
 #include <iostream>
 #include <memory>
+#include <numeric>
 #include <optional>
 #include <queue>
 #include <sstream>
@@ -567,8 +566,6 @@ tvm::transform::Pass AutoSchedule(const bool enable_epi) {
     extractor(func->body);
     Stmt body_to_schedule;
     bool has_tilelang_root = false;
-    PrimExpr updated_thread_extent; // Will be set if warpgroup partition
-                                    // doubles thread extent
     IterVar thread_var; // Thread index variable for warpgroup partition
 
     if (extractor.body.defined()) {
@@ -614,22 +611,15 @@ tvm::transform::Pass AutoSchedule(const bool enable_epi) {
 
     // Build ScheduleUnits from IRStructure
     ScheduleUnitBuilder unit_builder;
-    // Get thread index variable for warpgroup partition
-    // First try to get from body_to_schedule, if not found, try from the entire
-    // function body
-    thread_var = ThreadTagChecker::GetThreadVar(body_to_schedule);
-    if (!thread_var.defined()) {
-      thread_var = ThreadTagChecker::GetThreadVar(func->body);
-    }
     if (thread_var.defined()) {
       unit_builder.SetThreadVar(thread_var);
     } else {
       LOG(FATAL) << "Could not find thread index variable, warpgroup "
                     "partition will use default";
     }
-    unit_builder.SetEnableWarpPartition(config.enable_warp_partition);
-    unit_builder.SetSharedMemoryLimit(config.shared_memory_limit);
-    bool double_thread = unit_builder.Build(ir_structure);
+    unit_builder.SetWarpSpeicializeConfig(config);
+    unit_builder.SetSharedMemoryLimit(GetSharedMemoryLimit(target));
+    std::vector<PrimExpr> thread_count = unit_builder.Build(ir_structure);
 
     if (!config.enable_warpgroup_partition) {
       Stmt new_body = ConvertIRStructureToStmt(ir_structure.get(), enable_epi);
@@ -655,28 +645,13 @@ tvm::transform::Pass AutoSchedule(const bool enable_epi) {
     int next_barrier_id = 1;
     std::vector<Buffer> barrier_buffers;
     Map<ObjectRef, ObjectRef> barrier_map;
-    // Determine thread count for barrier arrive_count calculations
-    PrimExpr thread_count[2];
-    if (!config.enable_thread_extend) {
-      ICHECK(config.enable_warp_partition);
-      // sm_100: use fixed warp size (32) for both partitions
-      thread_count[0] = IntImm(DataType::Int(32), 32);
-      thread_count[1] = IntImm(DataType::Int(32), 32);
-    } else {
-      // sm_90: original behavior
-      thread_count[0] = thread_var->dom->extent;
-      thread_count[1] = double_thread ? thread_var->dom->extent
-                                      : IntImm(DataType::Int(32),
-                                               config.producer_thread_count);
-    }
     LoopNestingInfo loop_info;
     std::vector<MultiVersionBufferInfo> buffer_infos;
-    PrimExpr barrier_count = config.enable_thread_extend
-                                 ? thread_count[0] + thread_count[1]
-                                 : thread_var->dom->extent;
+    PrimExpr updated_thread_extent = std::accumulate(
+        thread_count.begin() + 1, thread_count.end(), thread_count[0]);
     Buffer neutral_sync_shared_barrier =
-        makeBarrierBuffer(barrier_count, "neutral_sync_shared_barrier", 1,
-                          barrier_buffers, barrier_map);
+        makeBarrierBuffer(updated_thread_extent, "neutral_sync_shared_barrier",
+                          1, barrier_buffers, barrier_map);
     AnalyzeAndInsertBarriers(
         ir_structure.get(), next_barrier_id, barrier_buffers, barrier_map,
         thread_count, loop_info, buffer_infos, neutral_sync_shared_barrier);
@@ -687,19 +662,7 @@ tvm::transform::Pass AutoSchedule(const bool enable_epi) {
     // Apply warpgroup partition to entire IRStructure
     Stmt new_body = ApplyWarpgroupPartitionToIRStructure(
         ir_structure.get(), thread_var, barrier_buffers, barrier_map,
-        enable_epi, thread_count, double_thread, config,
-        neutral_sync_shared_barrier);
-
-    if (config.enable_thread_extend) {
-      // sm_90: may need to update thread extent
-      if (double_thread) {
-        updated_thread_extent = thread_var->dom->extent * 2;
-      } else {
-        updated_thread_extent =
-            thread_var->dom->extent +
-            IntImm(DataType::Int(32), config.producer_thread_count);
-      }
-    }
+        enable_epi, thread_count, config, neutral_sync_shared_barrier);
 
     // If we extracted from tilelang_root block, replace the body
     Stmt final_body;

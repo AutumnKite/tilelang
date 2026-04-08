@@ -85,58 +85,25 @@ struct ComponentInfo {
   bool uses_tensor_core_{false};
 };
 
-// Warp specialization architecture enum
-enum class WarpSpecializeArch : uint8_t {
-  kHopper = 0,
-  kBlackwell = 1,
-  kUnsupported = 2,
-};
-
-// Configuration for warp specialization
-struct WarpSpecializeConfig {
-  WarpSpecializeArch arch = WarpSpecializeArch::kUnsupported;
-  int consumer_max_nreg = 0;
-  int producer_max_nreg = 0;
-  int producer_thread_count = 0;
-  bool enable_set_max_nreg = false;
-  bool enable_warpgroup_partition = false;
-  bool enable_thread_extend = false;
-  bool enable_warp_partition = false;
-  int shared_memory_limit = 0;
-};
-
 // Factory function to get warp specialization configuration for a target
 inline WarpSpecializeConfig GetWarpSpecializeConfig(Target target) {
   if (TargetIsHopper(target)) {
-    return {WarpSpecializeArch::kHopper,
-            240,
-            24,
-            128,
-            true,
-            true,
-            true,
-            false,
-            228 * 1024};
+    return {WarpSpecializeArch::kHopper, 240, 24, 128, true, true, true, false};
   } else if (TargetIsSm100(target)) {
-    return {WarpSpecializeArch::kBlackwell,
-            0,
-            0,
-            32,
-            false,
-            true,
-            false,
-            true,
-            228 * 1024};
+    return {WarpSpecializeArch::kBlackwell, 0, 0, 32, false, true, false, true};
   } else {
-    return {WarpSpecializeArch::kUnsupported,
-            0,
-            0,
-            0,
-            false,
-            false,
-            false,
-            false,
-            0};
+    return {
+        WarpSpecializeArch::kUnsupported, 0, 0, 0, false, false, false, false};
+  }
+}
+
+inline int64_t GetSharedMemoryLimit(Target target) {
+  if (TargetIsHopper(target)) {
+    return 228 * 1024;
+  } else if (TargetIsSm100(target)) {
+    return 228 * 1024;
+  } else {
+    return 48 * 1024;
   }
 }
 

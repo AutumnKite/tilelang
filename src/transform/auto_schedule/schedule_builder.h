@@ -29,7 +29,28 @@ using namespace tir;
 class TaskUnionFind;
 struct ComponentInfo;
 
-bool AssignWarpgroupIdsGlobal(IRStructure *root, bool enable_warp_partition);
+// Warp specialization architecture enum
+enum class WarpSpecializeArch : uint8_t {
+  kHopper = 0,
+  kBlackwell = 1,
+  kUnsupported = 2,
+};
+
+// Configuration for warp specialization
+struct WarpSpecializeConfig {
+  WarpSpecializeArch arch = WarpSpecializeArch::kUnsupported;
+  int consumer_max_nreg = 0;
+  int producer_max_nreg = 0;
+  int producer_thread_count = 0;
+  bool enable_set_max_nreg = false;
+  bool enable_warpgroup_partition = false;
+  bool enable_thread_extend = false;
+  bool enable_warp_partition = false;
+};
+
+std::vector<PrimExpr>
+AssignWarpgroupIdsGlobal(IRStructure *root, const WarpSpecializeConfig &config,
+                         PrimExpr thread_count);
 
 // Extract all sequential task nodes from the IR structure tree
 void GatherTaskNodes(const std::vector<std::shared_ptr<IRStructure>> &nodes,
@@ -54,11 +75,12 @@ void CollectSuffixTasks(IRStructure *root,
 // Builder that collects ScheduleUnits from IRStructure
 class ScheduleUnitBuilder {
 public:
-  bool Build(std::shared_ptr<IRStructure> &root) {
+  std::vector<PrimExpr> Build(std::shared_ptr<IRStructure> &root) {
     ScheduleRecursive(root, {});
 
     // Global warpgroup id assignment from the top level
-    return AssignWarpgroupIdsGlobal(root.get(), enable_warp_partition_);
+    return AssignWarpgroupIdsGlobal(root.get(), config_,
+                                    thread_var_->dom->extent);
   }
 
   // New recursive scheduling function that replaces Collect method
@@ -589,14 +611,16 @@ public:
   void SetThreadVar(IterVar thread_var) { thread_var_ = thread_var; }
 
   // Set enable_warp_partition flag
-  void SetEnableWarpPartition(bool enable) { enable_warp_partition_ = enable; }
+  void SetWarpSpeicializeConfig(const WarpSpecializeConfig &config) {
+    config_ = config;
+  }
 
   // Set shared memory limit for pipeline (in bytes)
   void SetSharedMemoryLimit(int64_t bytes) { shared_memory_limit_ = bytes; }
 
 private:
-  IterVar thread_var_; // Thread index variable for warpgroup partition
-  bool enable_warp_partition_ = false;
+  IterVar thread_var_;          // Thread index variable for warpgroup partition
+  WarpSpecializeConfig config_; // Configuration for warp specialization
   int64_t shared_memory_limit_ = 48 * 1024;
 
   // Check if two regions refer to the same buffer

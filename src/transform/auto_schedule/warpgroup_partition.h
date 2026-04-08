@@ -49,7 +49,7 @@ Stmt ConvertIRStructureToStmt(IRStructure *root, const bool outer_enable_epi);
 Stmt ApplyWarpgroupPartitionToIRStructure(
     IRStructure *root, IterVar thread_var, std::vector<Buffer> &barrier_buffers,
     Map<ObjectRef, ObjectRef> &barrier_map, const bool enable_epi,
-    PrimExpr thread_count[2], bool producer_consumer,
+    const std::vector<PrimExpr> &thread_count,
     const WarpSpecializeConfig &config, Buffer neutral_sync_shared_barrier);
 
 Stmt ReNestLetStmts(const Stmt &stmt);

@@ -237,7 +237,9 @@ void CollectSuffixTasks(IRStructure *root,
   }
 }
 
-bool AssignWarpgroupIdsGlobal(IRStructure *root, bool enable_warp_partition) {
+std::vector<PrimExpr>
+AssignWarpgroupIdsGlobal(IRStructure *root, const WarpSpecializeConfig &config,
+                         PrimExpr thread_count) {
   if (!root) {
     LOG(FATAL) << "Empty root";
   }
@@ -269,7 +271,7 @@ bool AssignWarpgroupIdsGlobal(IRStructure *root, bool enable_warp_partition) {
   CollectPrefixTasks(root, prefix_tasks, prefix_valid);
 
   std::unordered_set<TaskNode *> suffix_tasks;
-  if (enable_warp_partition) {
+  if (config.enable_warp_partition) {
     CollectSuffixTasks(root, all_tasks, uf, suffix_tasks);
   }
 
@@ -360,7 +362,12 @@ bool AssignWarpgroupIdsGlobal(IRStructure *root, bool enable_warp_partition) {
         }
       }
     }
-    return true;
+    if (config.enable_thread_extend) {
+      return {thread_count, thread_count};
+    } else {
+      return {IntImm(DataType::Int(32), 32), IntImm(DataType::Int(32), 32),
+              thread_count - IntImm(DataType::Int(32), 64)};
+    }
   } else {
     int64_t warpgroup0_latency = 0;
     int64_t warpgroup1_latency = 0;
@@ -387,7 +394,13 @@ bool AssignWarpgroupIdsGlobal(IRStructure *root, bool enable_warp_partition) {
         }
       }
     }
-    return false;
+    if (config.enable_thread_extend) {
+      return {thread_count,
+              IntImm(DataType::Int(32), config.producer_thread_count)};
+    } else {
+      return {IntImm(DataType::Int(32), 32), IntImm(DataType::Int(32), 32),
+              thread_count - IntImm(DataType::Int(32), 64)};
+    }
   }
 }
 

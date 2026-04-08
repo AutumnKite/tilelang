@@ -48,6 +48,7 @@
 #include <functional>
 #include <iostream>
 #include <memory>
+#include <numeric>
 #include <optional>
 #include <queue>
 #include <sstream>
@@ -250,6 +251,7 @@ CloneIRStructureWithWarpgroupFilter(IRStructure *node, int warpgroup_id,
     return new_unit;
   }
   LOG(FATAL);
+  return nullptr;
 }
 
 // Entry point overload — creates a fresh var_remap per call
@@ -716,7 +718,7 @@ Stmt ConvertIRStructureToStmt(IRStructure *root, const bool outer_enable_epi) {
 Stmt ApplyWarpgroupPartitionToIRStructure(
     IRStructure *root, IterVar thread_var, std::vector<Buffer> &barrier_buffers,
     Map<ObjectRef, ObjectRef> &barrier_map, const bool outer_enable_epi,
-    PrimExpr thread_count[2], bool producer_consumer,
+    const std::vector<PrimExpr> &thread_count,
     const WarpSpecializeConfig &config, Buffer neutral_sync_shared_barrier) {
   if (!root)
     return Evaluate(0);
@@ -727,8 +729,7 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
     if (wrapper->child) {
       body = ApplyWarpgroupPartitionToIRStructure(
           wrapper->child.get(), thread_var, barrier_buffers, barrier_map,
-          outer_enable_epi, thread_count, producer_consumer, config,
-          neutral_sync_shared_barrier);
+          outer_enable_epi, thread_count, config, neutral_sync_shared_barrier);
     }
     if (const auto *let = wrapper->wrapper.as<LetStmtNode>()) {
       return LetStmt(let->var, let->value, body);
@@ -736,301 +737,11 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
       return AttrStmt(attr->node, attr->attr_key, attr->value, body);
     } else {
       LOG(FATAL);
-    }
-  }
-
-  // Check if there are tasks with mixed warpgroup ids
-  std::vector<TaskNodeWithContext> all_tasks;
-  CollectAllTaskNodesWithContext(root, all_tasks);
-
-  bool has_warpgroup0 = false;
-  bool has_warpgroup1 = false;
-  bool has_warpgroup_neutral = false;
-  for (auto &task : all_tasks) {
-    int wg_id = task.task->GetWarpgroupId();
-    if (wg_id == 0)
-      has_warpgroup0 = true;
-    else if (wg_id == 1)
-      has_warpgroup1 = true;
-    else if (wg_id == -1)
-      has_warpgroup_neutral = true;
-  }
-
-  // Convert IRStructure to Stmt for IfThenElse
-  std::function<Stmt(IRStructure *)> irstructure_to_stmt;
-  irstructure_to_stmt = [&irstructure_to_stmt,
-                         outer_enable_epi](IRStructure *structure) -> Stmt {
-    if (!structure) {
       return Evaluate(0);
     }
-
-    if (structure->IsTask()) {
-      auto task = static_cast<TaskNode *>(structure);
-      if (task->stmts.empty()) {
-        return Evaluate(0);
-      } else if (task->stmts.size() == 1) {
-        return task->stmts[0];
-      } else {
-        return SeqStmt(task->stmts);
-      }
-    } else if (structure->IsSequence()) {
-      auto seq = static_cast<SequenceNode *>(structure);
-      std::vector<Stmt> stmts;
-      for (const auto &child : seq->children) {
-        auto unit = static_cast<ScheduleUnit *>(child.get());
-        for (auto &before : unit->before) {
-          for (auto &stmt : before) {
-            stmts.push_back(stmt);
-          }
-        }
-        Stmt child_stmt = irstructure_to_stmt(unit->child.get());
-        stmts.push_back(child_stmt);
-        for (auto &after : unit->after) {
-          for (auto &stmt : after) {
-            stmts.push_back(stmt);
-          }
-        }
-      }
-      auto flattened = SeqStmt::Flatten(stmts);
-      return flattened;
-    } else if (structure->IsControl()) {
-      auto ctrl = static_cast<ControlNode *>(structure);
-      Var loop_var = ctrl->control->loop_var;
-      PrimExpr loop_start = ctrl->control->min;
-      PrimExpr loop_extent = ctrl->control->extent;
-      PrimExpr loop_step = ctrl->control->step.has_value()
-                               ? ctrl->control->step.value()
-                               : IntImm(DataType::Int(32), 1);
-      int min_stages = 100, max_stages = -1;
-      if (ctrl->child->IsSequence()) {
-        auto seq = static_cast<SequenceNode *>(ctrl->child.get());
-        for (auto &child : seq->children) {
-          auto unit = static_cast<ScheduleUnit *>(child.get());
-          min_stages = std::min(min_stages, unit->stage);
-          max_stages = std::max(max_stages, unit->stage);
-        }
-      }
-      if (!ctrl->hasPromote() || !ctrl->child->IsSequence() ||
-          min_stages == max_stages) {
-        std::vector<Stmt> stmts;
-        if (ctrl->child->IsScheduleUnit()) {
-          auto unit = static_cast<ScheduleUnit *>(ctrl->child.get());
-          for (auto &before : unit->before) {
-            for (auto &stmt : before) {
-              stmts.push_back(stmt);
-            }
-          }
-          stmts.push_back(irstructure_to_stmt(unit->child.get()));
-          for (auto &after : unit->after) {
-            for (auto &stmt : after) {
-              stmts.push_back(stmt);
-            }
-          }
-        } else if (ctrl->child->IsSequence()) {
-          auto seq = static_cast<SequenceNode *>(ctrl->child.get());
-          for (auto &child : seq->children) {
-            ICHECK(child->IsScheduleUnit());
-            auto unit = static_cast<ScheduleUnit *>(child.get());
-            for (auto &before : unit->before) {
-              for (auto &stmt : before) {
-                stmts.push_back(stmt);
-              }
-            }
-            stmts.push_back(irstructure_to_stmt(unit->child.get()));
-            for (auto &after : unit->after) {
-              for (auto &stmt : after) {
-                stmts.push_back(stmt);
-              }
-            }
-          }
-        } else {
-          LOG(FATAL);
-        }
-        Stmt body = SeqStmt::Flatten(stmts);
-        // Filter out "num_stages" annotation
-        Map<String, Any> filtered_annotations = ctrl->control->annotations;
-        filtered_annotations.erase("num_stages");
-        return For(loop_var, loop_start, loop_extent, ctrl->control->kind, body,
-                   ctrl->control->thread_binding, filtered_annotations);
-      }
-      auto seq = static_cast<SequenceNode *>(ctrl->child.get());
-      Stmt body = Evaluate(0);
-      std::vector<std::vector<Stmt>> unit_stages;
-      unit_stages.resize(max_stages - min_stages + 1);
-      for (auto &child : seq->children) {
-        auto unit = static_cast<ScheduleUnit *>(child.get());
-        std::vector<Stmt> stmts;
-        for (auto &before : unit->before) {
-          for (auto &stmt : before) {
-            stmts.push_back(stmt);
-          }
-        }
-        stmts.push_back(irstructure_to_stmt(unit->child.get()));
-        for (auto &after : unit->after) {
-          for (auto &stmt : after) {
-            stmts.push_back(stmt);
-          }
-        }
-        unit_stages[unit->stage - min_stages].push_back(
-            SeqStmt::Flatten(stmts));
-      }
-      // Check if any task in this control node contains loop_break
-      // If any task contains loop_break, disable prologue
-      std::function<bool(IRStructure *)> check_contains_loop_break;
-      check_contains_loop_break =
-          [&check_contains_loop_break](IRStructure *structure) -> bool {
-        if (!structure)
-          return false;
-
-        if (structure->IsTask()) {
-          auto task = static_cast<TaskNode *>(structure);
-          return task->ContainsLoopBreak();
-        } else if (structure->IsSequence()) {
-          auto seq = static_cast<SequenceNode *>(structure);
-          for (const auto &child : seq->children) {
-            auto unit = static_cast<ScheduleUnit *>(child.get());
-            if (check_contains_loop_break(unit->child.get())) {
-              return true;
-            }
-          }
-          return false;
-        } else if (structure->IsScheduleUnit()) {
-          auto unit = static_cast<ScheduleUnit *>(structure);
-          return check_contains_loop_break(unit->child.get());
-        } else if (structure->IsControl()) {
-          auto ctrl = static_cast<ControlNode *>(structure);
-          return check_contains_loop_break(ctrl->child.get());
-        } else if (structure->IsWrapper()) {
-          auto wrapper = static_cast<WrapperNode *>(structure);
-          return check_contains_loop_break(wrapper->child.get());
-        }
-        return false;
-      };
-
-      // Set enable_pro to true only if:
-      // 1. No task contains loop_break
-      // 2. Loop boundaries (min and extent) are constants
-      bool enable_pro = !check_contains_loop_break(ctrl->child.get());
-
-      // Check if loop boundaries are constants
-      bool loop_min_is_const = tir::is_const_int(loop_start);
-      bool loop_extent_is_const = tir::is_const_int(loop_extent);
-
-      if (!loop_min_is_const || !loop_extent_is_const) {
-        enable_pro = false;
-      }
-
-      bool enable_epi = outer_enable_epi && enable_pro;
-      std::vector<Stmt> steady;
-
-      for (auto &child : seq->children) {
-        auto unit = static_cast<ScheduleUnit *>(child.get());
-        std::vector<Stmt> stmts;
-        for (auto &before : unit->before) {
-          for (auto &stmt : before) {
-            stmts.push_back(stmt);
-          }
-        }
-        stmts.push_back(irstructure_to_stmt(unit->child.get()));
-        for (auto &after : unit->after) {
-          for (auto &stmt : after) {
-            stmts.push_back(stmt);
-          }
-        }
-        Map<Var, PrimExpr> substitution, substitution_cond;
-        substitution.Set(loop_var,
-                         loop_var - loop_step * (max_stages - unit->stage));
-        substitution_cond.Set(
-            loop_var,
-            Max(loop_start,
-                Min(loop_start + loop_extent - loop_step,
-                    loop_var - loop_step * (max_stages - unit->stage))));
-        if (IsLetDeclNode(unit->child.get())) {
-          Stmt stmt = SeqStmt::Flatten(stmts);
-          steady.push_back(Substitute(stmt, substitution_cond));
-        } else {
-          PrimExpr condition =
-              And(loop_var < loop_start + loop_extent, loop_var >= loop_start);
-          if (unit->stage == min_stages) {
-            condition = loop_var >= loop_start;
-          }
-          if (unit->stage == max_stages) {
-            condition = loop_var < loop_start + loop_extent;
-          }
-          Stmt stmt = IfThenElse(condition, SeqStmt::Flatten(stmts));
-          steady.push_back(Substitute(stmt, substitution));
-        }
-      }
-      Stmt new_body = SeqStmt::Flatten(steady);
-      auto new_var = loop_var.copy_with_suffix("");
-      // Filter out "num_stages" annotation
-      Map<String, Any> filtered_annotations = ctrl->control->annotations;
-      filtered_annotations.erase("num_stages");
-      Map<Var, PrimExpr> substitution;
-      substitution.Set(loop_var, new_var);
-      For for_op =
-          For(new_var, loop_start,
-              ctrl->control->extent + loop_step * (max_stages - min_stages),
-              ctrl->control->kind, Substitute(new_body, substitution),
-              ctrl->control->thread_binding, filtered_annotations);
-
-      Stmt prologue = Evaluate(0);
-      if (enable_pro) {
-        Map<Var, PrimExpr> sub;
-        For new_for = for_op;
-        auto pro = loop_var.copy_with_suffix("_prologue");
-        sub.Set(new_var, pro);
-        new_for.CopyOnWrite()->loop_var = pro;
-        new_for.CopyOnWrite()->kind = ForKind::kUnrolled;
-        new_for.CopyOnWrite()->extent =
-            min(max_stages - min_stages, for_op.get()->extent);
-        for_op.CopyOnWrite()->min += loop_step * (max_stages - min_stages);
-        for_op.CopyOnWrite()->extent =
-            max(0, for_op.get()->extent - (max_stages - min_stages));
-        prologue = Substitute(new_for, sub);
-      }
-      Stmt epilogue = Evaluate(0);
-      if (enable_epi) {
-        Map<Var, PrimExpr> sub;
-        For new_for = for_op;
-        auto epi = loop_var.copy_with_suffix("_epilogue");
-        sub.Set(new_var, epi);
-        new_for.CopyOnWrite()->loop_var = epi;
-        new_for.CopyOnWrite()->kind = ForKind::kUnrolled;
-        new_for.CopyOnWrite()->min =
-            for_op.get()->min +
-            loop_step * (for_op.get()->extent - (max_stages - min_stages));
-        new_for.CopyOnWrite()->extent =
-            min(max_stages - min_stages, for_op.get()->extent);
-        for_op.CopyOnWrite()->extent =
-            max(0, for_op.get()->extent - (max_stages - min_stages));
-        epilogue = Substitute(new_for, sub);
-      }
-      return SeqStmt({prologue, for_op, epilogue});
-    } else if (structure->IsWrapper()) {
-      auto wrapper = static_cast<const WrapperNode *>(structure);
-      Stmt body = Evaluate(0);
-      if (wrapper->child) {
-        body = irstructure_to_stmt(wrapper->child.get());
-      }
-      if (const auto *let = wrapper->wrapper.as<LetStmtNode>()) {
-        return LetStmt(let->var, let->value, body);
-      } else if (const auto *attr = wrapper->wrapper.as<AttrStmtNode>()) {
-        return AttrStmt(attr->node, attr->attr_key, attr->value, body);
-      } else {
-        LOG(FATAL);
-      }
-    }
-
-    LOG(FATAL)
-        << "Failed to convert IRStructure to Stmt, returning empty statement";
-    return Evaluate(0);
-  };
-
-  // If all tasks belong to the same warpgroup, no partition needed
-  if (!(has_warpgroup0 && has_warpgroup1)) {
-    return irstructure_to_stmt(root);
   }
+
+  size_t num_wgs = thread_count.size();
 
   // Helper function to clone IRStructure filtering tasks with warpgroup_id ==
   // -1 (neutral tasks)
@@ -1078,9 +789,12 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
       return nullptr;
     }
     LOG(FATAL);
+    return nullptr;
   };
 
   auto has_actual_statements = [](IRStructure *node) -> bool {
+    if (!node)
+      return false;
     std::vector<TaskNodeWithContext> tasks;
     CollectAllTaskNodesWithContext(node, tasks);
     for (auto &task : tasks) {
@@ -1143,6 +857,7 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
       return nullptr;
     }
     LOG(FATAL);
+    return nullptr;
   };
 
   int last_warpgroup_task_top_level_index = -1;
@@ -1173,45 +888,41 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
     return !is_epi_top_level_index(top_level_index);
   };
 
-  auto wg_pro_neutral_structure = has_warpgroup_neutral
-                                      ? clone_neutral_filter_with_top_level(
-                                            root, is_pro_top_level_index, -1)
-                                      : nullptr;
-  auto wg_epi_neutral_structure = has_warpgroup_neutral
-                                      ? clone_neutral_filter_with_top_level(
-                                            root, is_epi_top_level_index, -1)
-                                      : nullptr;
-
-  auto wg0_structure =
-      RemoveUnusedLetDecls(CloneIRStructureWithWarpgroupFilter(root, 0));
-  auto wg1_structure =
-      RemoveUnusedLetDecls(CloneIRStructureWithWarpgroupFilter(root, 1));
+  auto wg_pro_neutral_structure =
+      clone_neutral_filter_with_top_level(root, is_pro_top_level_index, -1);
+  auto wg_epi_neutral_structure =
+      clone_neutral_filter_with_top_level(root, is_epi_top_level_index, -1);
+  std::vector<std::shared_ptr<IRStructure>> wg_structures(num_wgs);
+  for (size_t i = 0; i < num_wgs; ++i) {
+    wg_structures[i] =
+        RemoveUnusedLetDecls(CloneIRStructureWithWarpgroupFilter(root, i));
+  }
+  std::vector<PrimExpr> wg_conditions(num_wgs);
+  wg_conditions[0] = thread_count[0];
+  for (size_t i = 1; i < num_wgs; ++i) {
+    wg_conditions[i] = wg_conditions[i - 1] + thread_count[i];
+  }
+  for (auto &cond : wg_conditions) {
+    cond = thread_var->var < cond;
+  }
 
   bool wg_pro_neutral_has_stmts =
-      wg_pro_neutral_structure
-          ? has_actual_statements(wg_pro_neutral_structure.get())
-          : false;
+      has_actual_statements(wg_pro_neutral_structure.get());
   bool wg_epi_neutral_has_stmts =
-      wg_epi_neutral_structure
-          ? has_actual_statements(wg_epi_neutral_structure.get())
-          : false;
-  bool wg0_has_stmts = has_actual_statements(wg0_structure.get());
-  bool wg1_has_stmts = has_actual_statements(wg1_structure.get());
-
-  PrimExpr condition = thread_var->var < thread_count[0];
-  PrimExpr wg1_condition =
-      thread_var->var < (thread_count[0] + thread_count[1]);
+      has_actual_statements(wg_epi_neutral_structure.get());
 
   Stmt pro_neutral_body =
       wg_pro_neutral_has_stmts
-          ? irstructure_to_stmt(wg_pro_neutral_structure.get())
+          ? ConvertIRStructureToStmt(wg_pro_neutral_structure.get(),
+                                     outer_enable_epi)
           : Evaluate(0);
   Stmt epi_neutral_body =
       wg_epi_neutral_has_stmts
-          ? irstructure_to_stmt(wg_epi_neutral_structure.get())
+          ? ConvertIRStructureToStmt(wg_epi_neutral_structure.get(),
+                                     outer_enable_epi)
           : Evaluate(0);
 
-  // --- Segment the wg0/wg1 structures by ControlNode (for-loop) boundaries ---
+  // --- Segment the wg structures by ControlNode (for-loop) boundaries ---
   // This produces multiple IfThenElse blocks separated by liveness boundary
   // markers, so that the merge-shared-memory pass can reuse buffers across
   // segments whose lifetimes do not overlap.
@@ -1250,7 +961,7 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
   // Helper: wrap a list of ScheduleUnit children back into a temporary
   // SequenceNode and convert to Stmt.
   auto SegmentToStmt =
-      [&irstructure_to_stmt](
+      [&outer_enable_epi](
           const std::vector<std::shared_ptr<IRStructure>> &children) -> Stmt {
     if (children.empty())
       return Evaluate(0);
@@ -1258,23 +969,17 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
     // ScheduleUnit before/after stmts are emitted correctly.
     auto tmp_seq = std::make_shared<SequenceNode>();
     tmp_seq->children = children;
-    return irstructure_to_stmt(tmp_seq.get());
+    return ConvertIRStructureToStmt(tmp_seq.get(), outer_enable_epi);
   };
 
   // Helper: build a single IfThenElse (with wg1 nesting) from a pair of Stmts.
-  auto MakeWarpgroupIf = [&condition, &wg1_condition](Stmt wg0_stmt,
-                                                      Stmt wg1_stmt) -> Stmt {
-    bool wg0_valid = !IsEvaluateZero(wg0_stmt);
-    bool wg1_valid = !IsEvaluateZero(wg1_stmt);
-    if (wg0_valid && wg1_valid) {
-      return IfThenElse(condition, wg0_stmt,
-                        IfThenElse(wg1_condition, wg1_stmt, Evaluate(0)));
-    } else if (wg0_valid) {
-      return IfThenElse(condition, wg0_stmt);
-    } else if (wg1_valid) {
-      return IfThenElse(wg1_condition, wg1_stmt);
+  auto MakeWarpgroupIf =
+      [&wg_conditions](const std::vector<Stmt> &wg_stmts) -> Stmt {
+    Stmt if_then_else = Evaluate(0);
+    for (size_t i = wg_stmts.size(); i-- > 0;) {
+      if_then_else = IfThenElse(wg_conditions[i], wg_stmts[i], if_then_else);
     }
-    return Evaluate(0);
+    return if_then_else;
   };
 
   // Helper: collect LetDecl {Var, PrimExpr} pairs from a segment's children.
@@ -1369,110 +1074,102 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
   };
 
   Stmt if_then_else;
-  if (wg0_has_stmts && wg1_has_stmts) {
-    auto wg0_segments = SegmentSequenceChildren(wg0_structure.get());
-    auto wg1_segments = SegmentSequenceChildren(wg1_structure.get());
-
-    // Only apply segmented splitting when both sides have matching segment
-    // counts (they originate from the same root, split at ControlNode
-    // boundaries, so they should match). Otherwise fall back to the
-    // single-IfThenElse path.
-    if (!wg0_segments.empty() && !wg1_segments.empty() &&
-        wg0_segments.size() == wg1_segments.size() && wg0_segments.size() > 1) {
-      std::vector<Stmt> segmented_stmts;
-      bool has_simt_copy = false;
-      // Check for SIMT copy in any wg1 segment (needed for set_max_nreg
-      // decision).
-      {
-        Stmt full_wg1 = irstructure_to_stmt(wg1_structure.get());
-        has_simt_copy = SimtCopyDetector::Detect(full_wg1);
-      }
-
-      // Accumulate LetDecl info from previous segments for variable renaming.
-      std::vector<std::pair<Var, PrimExpr>> wg0_accumulated_lets;
-      std::vector<std::pair<Var, PrimExpr>> wg1_accumulated_lets;
-
-      for (size_t si = 0; si < wg0_segments.size(); ++si) {
-        // Insert liveness boundary between segments.
-        segmented_stmts.push_back(
-            AttrStmt(Integer(0), attr::kAutoScheduleSharedMemoryBoundary, 0,
-                     Evaluate(0)));
-
-        // Collect LetDecl info from current segment before converting to Stmt.
-        auto wg0_lets = CollectLetDeclInfo(wg0_segments[si]);
-        auto wg1_lets = CollectLetDeclInfo(wg1_segments[si]);
-
-        Stmt wg0_seg_stmt = SegmentToStmt(wg0_segments[si]);
-        Stmt wg1_seg_stmt = SegmentToStmt(wg1_segments[si]);
-
-        // For segments after the first, wrap with renamed LetDecl bindings
-        // from all previous segments so that variables remain in scope.
-        if (si > 0) {
-          wg0_seg_stmt =
-              WrapWithRenamedLetDecls(wg0_seg_stmt, wg0_accumulated_lets);
-          wg1_seg_stmt =
-              WrapWithRenamedLetDecls(wg1_seg_stmt, wg1_accumulated_lets);
-        }
-
-        // Accumulate this segment's LetDecls for future segments.
-        wg0_accumulated_lets.insert(wg0_accumulated_lets.end(),
-                                    wg0_lets.begin(), wg0_lets.end());
-        wg1_accumulated_lets.insert(wg1_accumulated_lets.end(),
-                                    wg1_lets.begin(), wg1_lets.end());
-
-        // Prepend set_max_nreg only to the first segment.
-        if (si == 0 && !has_simt_copy && config.enable_set_max_nreg) {
-          wg0_seg_stmt =
-              SeqStmt({Evaluate(Call(DataType::Handle(), tl::set_max_nreg(),
-                                     {config.consumer_max_nreg, 1})),
-                       wg0_seg_stmt});
-          wg1_seg_stmt =
-              SeqStmt({Evaluate(Call(DataType::Handle(), tl::set_max_nreg(),
-                                     {config.producer_max_nreg, 0})),
-                       wg1_seg_stmt});
-        }
-
-        segmented_stmts.push_back(MakeWarpgroupIf(wg0_seg_stmt, wg1_seg_stmt));
-      }
-      if_then_else = SeqStmt::Flatten(segmented_stmts);
-    } else {
-      // Fallback: single IfThenElse (original logic).
-      Stmt then_body = irstructure_to_stmt(wg0_structure.get());
-      Stmt else_body = irstructure_to_stmt(wg1_structure.get());
-      bool has_simt_copy = SimtCopyDetector::Detect(else_body);
-      if (has_simt_copy || !config.enable_set_max_nreg) {
-        if_then_else =
-            IfThenElse(condition, then_body,
-                       IfThenElse(wg1_condition, else_body, Evaluate(0)));
-      } else {
-        std::vector<Stmt> then_body_with_nreg{
-            Evaluate(Call(DataType::Handle(), tl::set_max_nreg(),
-                          {config.consumer_max_nreg, 1})),
-            then_body};
-        std::vector<Stmt> else_body_with_nreg{
-            Evaluate(Call(DataType::Handle(), tl::set_max_nreg(),
-                          {config.producer_max_nreg, 0})),
-            else_body};
-        if_then_else =
-            IfThenElse(condition, SeqStmt(then_body_with_nreg),
-                       IfThenElse(wg1_condition, SeqStmt(else_body_with_nreg),
-                                  Evaluate(0)));
-      }
-    }
-  } else if (wg0_has_stmts) {
-    // Only warpgroup 0 has statements, execute unconditionally
-    if_then_else = irstructure_to_stmt(wg0_structure.get());
-  } else if (wg1_has_stmts) {
-    // Only warpgroup 1 has statements, execute unconditionally
-    if_then_else = irstructure_to_stmt(wg1_structure.get());
-  } else {
-    // Neither warpgroup 0 nor 1 has statements
-    if_then_else = Evaluate(0);
+  std::vector<std::vector<std::vector<std::shared_ptr<IRStructure>>>>
+      wg_segments(num_wgs);
+  bool equal_segment_counts = true;
+  for (size_t i = 0; i < num_wgs; ++i) {
+    wg_segments[i] = SegmentSequenceChildren(wg_structures[i].get());
+    equal_segment_counts &= (wg_segments[i].size() == wg_segments[0].size());
   }
 
-  PrimExpr barrier_count = config.enable_thread_extend
-                               ? thread_count[0] + thread_count[1]
-                               : thread_var->dom->extent;
+  // Only apply segmented splitting when both sides have matching segment
+  // counts (they originate from the same root, split at ControlNode
+  // boundaries, so they should match). Otherwise fall back to the
+  // single-IfThenElse path.
+  if (equal_segment_counts && wg_segments[0].size() > 1) {
+    std::vector<Stmt> segmented_stmts;
+    bool has_simt_copy = false;
+    // Check for SIMT copy in any wg1 segment (needed for set_max_nreg
+    // decision).
+    if (num_wgs == 2) {
+      Stmt full_wg1 =
+          ConvertIRStructureToStmt(wg_structures[1].get(), outer_enable_epi);
+      has_simt_copy = SimtCopyDetector::Detect(full_wg1);
+    }
+
+    // Accumulate LetDecl info from previous segments for variable renaming.
+    std::vector<std::vector<std::pair<Var, PrimExpr>>> wg_accumulated_lets(
+        num_wgs);
+
+    for (size_t si = 0; si < wg_segments[0].size(); ++si) {
+      // Insert liveness boundary between segments.
+      segmented_stmts.push_back(AttrStmt(
+          Integer(0), attr::kAutoScheduleSharedMemoryBoundary, 0, Evaluate(0)));
+
+      // Collect LetDecl info from current segment before converting to Stmt.
+      std::vector<std::vector<std::pair<Var, PrimExpr>>> wg_lets(num_wgs);
+      for (size_t i = 0; i < num_wgs; ++i) {
+        wg_lets[i] = CollectLetDeclInfo(wg_segments[i][si]);
+      }
+      std::vector<Stmt> wg_seg_stmts(num_wgs);
+      for (size_t i = 0; i < num_wgs; ++i) {
+        wg_seg_stmts[i] = SegmentToStmt(wg_segments[i][si]);
+      }
+
+      // For segments after the first, wrap with renamed LetDecl bindings
+      // from all previous segments so that variables remain in scope.
+      if (si > 0) {
+        for (size_t i = 0; i < num_wgs; ++i) {
+          wg_seg_stmts[i] =
+              WrapWithRenamedLetDecls(wg_seg_stmts[i], wg_accumulated_lets[i]);
+        }
+      }
+
+      // Accumulate this segment's LetDecls for future segments.
+      for (size_t i = 0; i < num_wgs; ++i) {
+        wg_accumulated_lets[i].insert(wg_accumulated_lets[i].end(),
+                                      wg_lets[i].begin(), wg_lets[i].end());
+      }
+
+      // Prepend set_max_nreg only to the first segment.
+      if (si == 0 && !has_simt_copy && num_wgs == 2 &&
+          config.enable_set_max_nreg) {
+        for (size_t i = 0; i < num_wgs; ++i) {
+          wg_seg_stmts[i] =
+              SeqStmt({Evaluate(Call(DataType::Handle(), tl::set_max_nreg(),
+                                     {i == 0 ? config.consumer_max_nreg
+                                             : config.producer_max_nreg,
+                                      static_cast<int>(!i)})),
+                       wg_seg_stmts[i]});
+        }
+      }
+
+      segmented_stmts.push_back(MakeWarpgroupIf(wg_seg_stmts));
+    }
+    if_then_else = SeqStmt::Flatten(segmented_stmts);
+  } else {
+    // Fallback: single IfThenElse (original logic).
+    std::vector<Stmt> wg_stmts(num_wgs);
+    for (size_t i = 0; i < num_wgs; ++i) {
+      wg_stmts[i] =
+          ConvertIRStructureToStmt(wg_structures[i].get(), outer_enable_epi);
+    }
+    bool has_simt_copy = num_wgs == 2 && SimtCopyDetector::Detect(wg_stmts[1]);
+    if (!has_simt_copy && num_wgs == 2 && config.enable_set_max_nreg) {
+      for (size_t i = 0; i < num_wgs; ++i) {
+        wg_stmts[i] =
+            SeqStmt({Evaluate(Call(DataType::Handle(), tl::set_max_nreg(),
+                                   {i == 0 ? config.consumer_max_nreg
+                                           : config.producer_max_nreg,
+                                    static_cast<int>(!i)})),
+                     wg_stmts[i]});
+      }
+    }
+    if_then_else = MakeWarpgroupIf(wg_stmts);
+  }
+
+  PrimExpr updated_thread_extent = std::accumulate(
+      thread_count.begin() + 1, thread_count.end(), thread_count[0]);
 
   Stmt pro_and_warpgroup_stmt;
   if (wg_pro_neutral_has_stmts) {
@@ -1481,7 +1178,7 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
       // synchronization
       pro_and_warpgroup_stmt = InsertBarriersForNeutralSync(
           pro_neutral_body, if_then_else, barrier_buffers, barrier_map,
-          barrier_count, neutral_sync_shared_barrier);
+          updated_thread_extent, neutral_sync_shared_barrier);
     } else if (!IsEvaluateZero(if_then_else) ||
                !IsEvaluateZero(pro_neutral_body)) {
       // Only one has actual statements
@@ -1508,15 +1205,14 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
   bool need_shared_barrier_for_epi = false;
   bool need_tmem_barrier_for_epi = false;
   if (wg_epi_neutral_structure) {
-    for (const auto *warpgroup_structure :
-         {wg0_structure.get(), wg1_structure.get()}) {
+    for (const auto &warpgroup_structure : wg_structures) {
       need_shared_barrier_for_epi =
           need_shared_barrier_for_epi ||
-          HasSharedWriteReadDependency(warpgroup_structure,
+          HasSharedWriteReadDependency(warpgroup_structure.get(),
                                        wg_epi_neutral_structure.get());
       need_tmem_barrier_for_epi =
           need_tmem_barrier_for_epi ||
-          HasTmemWriteReadDependency(warpgroup_structure,
+          HasTmemWriteReadDependency(warpgroup_structure.get(),
                                      wg_epi_neutral_structure.get());
     }
   }
@@ -1526,10 +1222,12 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
       !IsEvaluateZero(epi_neutral_body)) {
     // Both have statements: insert barriers for warpgroup-to-epi_neutral
     // synchronization
+    // TODO: tensor core may not only in wg0?
     combined_stmt = InsertBarriersForNeutralSyncWithDependency(
         pro_and_warpgroup_stmt, epi_neutral_body, barrier_buffers, barrier_map,
-        barrier_count, need_shared_barrier_for_epi, need_tmem_barrier_for_epi,
-        Buffer(), thread_var->var, 0, thread_count[0]);
+        updated_thread_extent, need_shared_barrier_for_epi,
+        need_tmem_barrier_for_epi, Buffer(), thread_var->var, 0,
+        thread_count[0]);
   } else if (!IsEvaluateZero(epi_neutral_body)) {
     combined_stmt = epi_neutral_body;
   } else {

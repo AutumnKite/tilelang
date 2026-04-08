@@ -167,14 +167,15 @@ static void
 AnalyzeAndInsertBarriers(IRStructure *node, int &next_barrier_id,
                          std::vector<Buffer> &barrier_buffers,
                          Map<ObjectRef, ObjectRef> &barrier_map,
-                         PrimExpr thread_count[2], LoopNestingInfo &loop_info,
+                         const std::vector<PrimExpr> &thread_count,
+                         LoopNestingInfo &loop_info,
                          std::vector<MultiVersionBufferInfo> &buffer_infos,
                          Buffer neutral_sync_shared_barrier);
 static void
 AnalyzeSequenceNodeBarriers(SequenceNode *seq, int &next_barrier_id,
                             std::vector<Buffer> &barrier_buffers,
                             Map<ObjectRef, ObjectRef> &barrier_map,
-                            PrimExpr thread_count[2],
+                            const std::vector<PrimExpr> &thread_count,
                             LoopNestingInfo &loop_info,
                             std::vector<MultiVersionBufferInfo> &buffer_infos,
                             Buffer neutral_sync_shared_barrier);
@@ -182,7 +183,8 @@ static void
 AnalyzeControlNodeBarriers(ControlNode *ctrl, int &next_barrier_id,
                            std::vector<Buffer> &barrier_buffers,
                            Map<ObjectRef, ObjectRef> &barrier_map,
-                           PrimExpr thread_count[2], LoopNestingInfo &loop_info,
+                           const std::vector<PrimExpr> &thread_count,
+                           LoopNestingInfo &loop_info,
                            std::vector<MultiVersionBufferInfo> &buffer_infos,
                            Buffer neutral_sync_shared_barrier);
 
@@ -543,7 +545,8 @@ static void
 AnalyzeAndInsertBarriers(IRStructure *node, int &next_barrier_id,
                          std::vector<Buffer> &barrier_buffers,
                          Map<ObjectRef, ObjectRef> &barrier_map,
-                         PrimExpr thread_count[2], LoopNestingInfo &loop_info,
+                         const std::vector<PrimExpr> &thread_count,
+                         LoopNestingInfo &loop_info,
                          std::vector<MultiVersionBufferInfo> &buffer_infos,
                          Buffer neutral_sync_shared_barrier) {
   if (!node)
@@ -575,7 +578,7 @@ static void
 AnalyzeSequenceNodeBarriers(SequenceNode *seq, int &next_barrier_id,
                             std::vector<Buffer> &barrier_buffers,
                             Map<ObjectRef, ObjectRef> &barrier_map,
-                            PrimExpr thread_count[2],
+                            const std::vector<PrimExpr> &thread_count,
                             LoopNestingInfo &loop_info,
                             std::vector<MultiVersionBufferInfo> &buffer_infos,
                             Buffer neutral_sync_shared_barrier) {
@@ -786,7 +789,8 @@ static void
 AnalyzeControlNodeBarriers(ControlNode *ctrl, int &next_barrier_id,
                            std::vector<Buffer> &barrier_buffers,
                            Map<ObjectRef, ObjectRef> &barrier_map,
-                           PrimExpr thread_count[2], LoopNestingInfo &loop_info,
+                           const std::vector<PrimExpr> &thread_count,
+                           LoopNestingInfo &loop_info,
                            std::vector<MultiVersionBufferInfo> &buffer_infos,
                            Buffer neutral_sync_shared_barrier) {
   if (!ctrl || !ctrl->child)
