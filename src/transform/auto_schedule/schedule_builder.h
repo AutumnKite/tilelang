@@ -611,7 +611,7 @@ public:
   void SetThreadVar(IterVar thread_var) { thread_var_ = thread_var; }
 
   // Set enable_warp_partition flag
-  void SetWarpSpeicializeConfig(const WarpSpecializeConfig &config) {
+  void SetWarpSpecializeConfig(const WarpSpecializeConfig &config) {
     config_ = config;
   }
 
