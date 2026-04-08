@@ -569,15 +569,10 @@ private:
 class ScheduleUnit : public IRStructure {
 public:
   int stage;
-  std::vector<std::vector<Stmt>> before, after;
+  std::map<int, std::vector<Stmt>> before, after;
   std::shared_ptr<IRStructure> child;
 
-  ScheduleUnit() {
-    for (unsigned idx = 0; idx != 2; ++idx) {
-      before.emplace_back();
-      after.emplace_back();
-    }
-  }
+  ScheduleUnit() {}
 
   Kind GetKind() const override { return Kind::kSchedule; }
 
@@ -611,12 +606,12 @@ public:
     if (child) {
       child->SubstituteVar(old_var, new_var);
     }
-    for (auto &stmts : before) {
+    for (auto &[_, stmts] : before) {
       for (auto &stmt : stmts) {
         stmt = Substitute(stmt, {{old_var, new_var}});
       }
     }
-    for (auto &stmts : after) {
+    for (auto &[_, stmts] : after) {
       for (auto &stmt : stmts) {
         stmt = Substitute(stmt, {{old_var, new_var}});
       }
@@ -925,13 +920,13 @@ inline void PrintAllStmts(const IRStructure *node, int indent = 0) {
     const ScheduleUnit *promote = static_cast<const ScheduleUnit *>(node);
     LOG(INFO) << indent_str << "ScheduleUnit:";
     LOG(INFO) << indent_str << "  Promote: " << promote->stage;
-    for (unsigned idx = 0; idx != promote->before.size(); ++idx) {
-      for (auto &stmt : promote->before[idx]) {
+    for (const auto &[idx, stmts] : promote->before) {
+      for (const auto &stmt : stmts) {
         LOG(INFO) << indent_str << "  Before " << idx << " : " << stmt;
       }
     }
-    for (unsigned idx = 0; idx != promote->after.size(); ++idx) {
-      for (auto &stmt : promote->after[idx]) {
+    for (const auto &[idx, stmts] : promote->after) {
+      for (const auto &stmt : stmts) {
         LOG(INFO) << indent_str << "  After " << idx << " : " << stmt;
       }
     }
@@ -1021,13 +1016,13 @@ inline void PrintIRStructure(const IRStructure *node, int indent = 0) {
     const ScheduleUnit *promote = static_cast<const ScheduleUnit *>(node);
     LOG(INFO) << indent_str << "ScheduleUnit:";
     LOG(INFO) << indent_str << "  Promote: " << promote->stage;
-    for (unsigned idx = 0; idx != promote->before.size(); ++idx) {
-      for (auto &stmt : promote->before[idx]) {
+    for (const auto &[idx, stmts] : promote->before) {
+      for (const auto &stmt : stmts) {
         LOG(INFO) << indent_str << "  Before " << idx << " : " << stmt;
       }
     }
-    for (unsigned idx = 0; idx != promote->after.size(); ++idx) {
-      for (auto &stmt : promote->after[idx]) {
+    for (const auto &[idx, stmts] : promote->after) {
+      for (const auto &stmt : stmts) {
         LOG(INFO) << indent_str << "  After " << idx << " : " << stmt;
       }
     }

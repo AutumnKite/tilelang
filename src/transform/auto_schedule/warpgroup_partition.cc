@@ -325,11 +325,11 @@ RemoveUnusedLetDecls(std::shared_ptr<IRStructure> root) {
           auto unit = static_cast<const ScheduleUnit *>(node);
           collect(unit->child.get());
           VarRefCollector collector;
-          for (const auto &stmts : unit->before) {
+          for (const auto &[_, stmts] : unit->before) {
             for (const auto &s : stmts)
               collector(s);
           }
-          for (const auto &stmts : unit->after) {
+          for (const auto &[_, stmts] : unit->after) {
             for (const auto &s : stmts)
               collector(s);
           }
@@ -462,14 +462,14 @@ Stmt ConvertIRStructureToStmt(IRStructure *root, const bool outer_enable_epi) {
       std::vector<Stmt> stmts;
       for (const auto &child : seq->children) {
         auto unit = static_cast<ScheduleUnit *>(child.get());
-        for (auto &before : unit->before) {
+        for (auto &[_, before] : unit->before) {
           for (auto &stmt : before) {
             stmts.push_back(stmt);
           }
         }
         Stmt child_stmt = irstructure_to_stmt(unit->child.get());
         stmts.push_back(child_stmt);
-        for (auto &after : unit->after) {
+        for (auto &[_, after] : unit->after) {
           for (auto &stmt : after) {
             stmts.push_back(stmt);
           }
@@ -499,13 +499,13 @@ Stmt ConvertIRStructureToStmt(IRStructure *root, const bool outer_enable_epi) {
         std::vector<Stmt> stmts;
         if (ctrl->child->IsScheduleUnit()) {
           auto unit = static_cast<ScheduleUnit *>(ctrl->child.get());
-          for (auto &before : unit->before) {
+          for (auto &[_, before] : unit->before) {
             for (auto &stmt : before) {
               stmts.push_back(stmt);
             }
           }
           stmts.push_back(irstructure_to_stmt(unit->child.get()));
-          for (auto &after : unit->after) {
+          for (auto &[_, after] : unit->after) {
             for (auto &stmt : after) {
               stmts.push_back(stmt);
             }
@@ -515,13 +515,13 @@ Stmt ConvertIRStructureToStmt(IRStructure *root, const bool outer_enable_epi) {
           for (auto &child : seq->children) {
             ICHECK(child->IsScheduleUnit());
             auto unit = static_cast<ScheduleUnit *>(child.get());
-            for (auto &before : unit->before) {
+            for (auto &[_, before] : unit->before) {
               for (auto &stmt : before) {
                 stmts.push_back(stmt);
               }
             }
             stmts.push_back(irstructure_to_stmt(unit->child.get()));
-            for (auto &after : unit->after) {
+            for (auto &[_, after] : unit->after) {
               for (auto &stmt : after) {
                 stmts.push_back(stmt);
               }
@@ -544,14 +544,14 @@ Stmt ConvertIRStructureToStmt(IRStructure *root, const bool outer_enable_epi) {
       for (auto &child : seq->children) {
         auto unit = static_cast<ScheduleUnit *>(child.get());
         std::vector<Stmt> stmts;
-        for (auto &before : unit->before) {
-          for (auto &stmt : before) {
+        for (const auto &[_, before] : unit->before) {
+          for (const auto &stmt : before) {
             stmts.push_back(stmt);
           }
         }
         stmts.push_back(irstructure_to_stmt(unit->child.get()));
-        for (auto &after : unit->after) {
-          for (auto &stmt : after) {
+        for (const auto &[_, after] : unit->after) {
+          for (const auto &stmt : after) {
             stmts.push_back(stmt);
           }
         }
@@ -610,14 +610,14 @@ Stmt ConvertIRStructureToStmt(IRStructure *root, const bool outer_enable_epi) {
       for (auto &child : seq->children) {
         auto unit = static_cast<ScheduleUnit *>(child.get());
         std::vector<Stmt> stmts;
-        for (auto &before : unit->before) {
-          for (auto &stmt : before) {
+        for (const auto &[_, before] : unit->before) {
+          for (const auto &stmt : before) {
             stmts.push_back(stmt);
           }
         }
         stmts.push_back(irstructure_to_stmt(unit->child.get()));
-        for (auto &after : unit->after) {
-          for (auto &stmt : after) {
+        for (const auto &[_, after] : unit->after) {
+          for (const auto &stmt : after) {
             stmts.push_back(stmt);
           }
         }
