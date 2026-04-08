@@ -40,7 +40,7 @@ def matmul(
             for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
                 T.copy(A[by * block_M, k * block_K], A_shared)  # not trans_A
                 T.copy(B[bx * block_N, k * block_K], B_shared)  # trans_B
-                T.gemm(A_shared, B_shared, C_tmem, trans_A, trans_B, wg_wait=-1, clear_accum=k == 0)
+                T.gemm(A_shared, B_shared, C_tmem, trans_A, trans_B, clear_accum=k == 0)
 
             T.copy(C_tmem, C_local)
             T.copy(C_local, C_shared)
