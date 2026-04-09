@@ -1118,91 +1118,109 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
     equal_segment_counts &= (wg_segments[i].size() == wg_segments[0].size());
   }
 
-  // Only apply segmented splitting when both sides have matching segment
-  // counts (they originate from the same root, split at ControlNode
-  // boundaries, so they should match). Otherwise fall back to the
-  // single-IfThenElse path.
-  if (equal_segment_counts && wg_segments[0].size() > 1) {
-    std::vector<Stmt> segmented_stmts;
-    bool has_simt_copy = false;
-    // Check for SIMT copy in any wg1 segment (needed for set_max_nreg
-    // decision).
-    if (num_wgs == 2) {
-      Stmt full_wg1 =
-          ConvertIRStructureToStmt(wg_structures[1].get(), outer_enable_epi);
-      has_simt_copy = SimtCopyDetector::Detect(full_wg1);
-    }
+  // Helper: extract the For loop_var pointer from a Control segment
+  // (a segment with exactly one ScheduleUnit whose child is a ControlNode).
+  auto GetControlLoopVar =
+      [](const std::vector<std::shared_ptr<IRStructure>> &seg)
+      -> const VarNode * {
+    if (seg.size() != 1)
+      return nullptr;
+    auto unit = static_cast<ScheduleUnit *>(seg[0].get());
+    if (!unit->child || !unit->child->IsControl())
+      return nullptr;
+    auto ctrl = static_cast<ControlNode *>(unit->child.get());
+    return ctrl->control->loop_var.get();
+  };
 
-    // Accumulate LetDecl info from previous segments for variable renaming.
-    std::vector<std::vector<std::pair<Var, PrimExpr>>> wg_accumulated_lets(
-        num_wgs);
-
-    for (size_t si = 0; si < wg_segments[0].size(); ++si) {
-      // Insert liveness boundary between segments.
-      segmented_stmts.push_back(AttrStmt(
-          Integer(0), attr::kAutoScheduleSharedMemoryBoundary, 0, Evaluate(0)));
-
-      // Collect LetDecl info from current segment before converting to Stmt.
-      std::vector<std::vector<std::pair<Var, PrimExpr>>> wg_lets(num_wgs);
-      for (size_t i = 0; i < num_wgs; ++i) {
-        wg_lets[i] = CollectLetDeclInfo(wg_segments[i][si]);
-      }
-      std::vector<Stmt> wg_seg_stmts(num_wgs);
-      for (size_t i = 0; i < num_wgs; ++i) {
-        wg_seg_stmts[i] = SegmentToStmt(wg_segments[i][si]);
-      }
-
-      // For segments after the first, wrap with renamed LetDecl bindings
-      // from all previous segments so that variables remain in scope.
-      if (si > 0) {
-        for (size_t i = 0; i < num_wgs; ++i) {
-          wg_seg_stmts[i] =
-              WrapWithRenamedLetDecls(wg_seg_stmts[i], wg_accumulated_lets[i]);
+  auto MergeNonControlSegments =
+      [&GetControlLoopVar](
+          std::vector<std::vector<std::shared_ptr<IRStructure>>> &segments) {
+        std::vector<std::vector<std::shared_ptr<IRStructure>>> merged;
+        std::vector<std::shared_ptr<IRStructure>> pending;
+        for (auto &seg : segments) {
+          auto lv = GetControlLoopVar(seg);
+          if (lv) {
+            // Control segment: prepend any pending non-Control children
+            merged.push_back(std::move(pending));
+            merged.push_back(std::move(seg));
+            pending.clear();
+          } else {
+            // Non-Control segment: accumulate for merging
+            pending.insert(pending.end(),
+                            std::make_move_iterator(seg.begin()),
+                            std::make_move_iterator(seg.end()));
+          }
         }
-      }
+        // Trailing non-Control segments: append to last merged segment
+        merged.push_back(std::move(pending));
+        segments = std::move(merged);
+      };
 
-      // Accumulate this segment's LetDecls for future segments.
-      for (size_t i = 0; i < num_wgs; ++i) {
-        wg_accumulated_lets[i].insert(wg_accumulated_lets[i].end(),
-                                      wg_lets[i].begin(), wg_lets[i].end());
-      }
-
-      // Prepend set_max_nreg only to the first segment.
-      if (si == 0 && !has_simt_copy && num_wgs == 2 &&
-          config.enable_set_max_nreg) {
-        for (size_t i = 0; i < num_wgs; ++i) {
-          wg_seg_stmts[i] =
-              SeqStmt({Evaluate(Call(DataType::Handle(), tl::set_max_nreg(),
-                                     {i == 0 ? config.consumer_max_nreg
-                                             : config.producer_max_nreg,
-                                      static_cast<int>(!i)})),
-                       wg_seg_stmts[i]});
-        }
-      }
-
-      segmented_stmts.push_back(MakeWarpgroupIf(wg_seg_stmts));
-    }
-    if_then_else = SeqStmt::Flatten(segmented_stmts);
-  } else {
-    // Fallback: single IfThenElse (original logic).
-    std::vector<Stmt> wg_stmts(num_wgs);
-    for (size_t i = 0; i < num_wgs; ++i) {
-      wg_stmts[i] =
-          ConvertIRStructureToStmt(wg_structures[i].get(), outer_enable_epi);
-    }
-    bool has_simt_copy = num_wgs == 2 && SimtCopyDetector::Detect(wg_stmts[1]);
-    if (!has_simt_copy && num_wgs == 2 && config.enable_set_max_nreg) {
-      for (size_t i = 0; i < num_wgs; ++i) {
-        wg_stmts[i] =
-            SeqStmt({Evaluate(Call(DataType::Handle(), tl::set_max_nreg(),
-                                   {i == 0 ? config.consumer_max_nreg
-                                           : config.producer_max_nreg,
-                                    static_cast<int>(!i)})),
-                     wg_stmts[i]});
-      }
-    }
-    if_then_else = MakeWarpgroupIf(wg_stmts);
+  for (auto &segments : wg_segments) {
+    MergeNonControlSegments(segments);
   }
+
+  // Apply segmented splitting
+  std::vector<Stmt> segmented_stmts;
+  bool has_simt_copy = false;
+  // Check for SIMT copy in any wg1 segment (needed for set_max_nreg
+  // decision).
+  if (num_wgs == 2) {
+    Stmt full_wg1 =
+        ConvertIRStructureToStmt(wg_structures[1].get(), outer_enable_epi);
+    has_simt_copy = SimtCopyDetector::Detect(full_wg1);
+  }
+
+  // Accumulate LetDecl info from previous segments for variable renaming.
+  std::vector<std::vector<std::pair<Var, PrimExpr>>> wg_accumulated_lets(
+      num_wgs);
+
+  for (size_t si = 0; si < wg_segments[0].size(); ++si) {
+    // Insert liveness boundary between segments.
+    segmented_stmts.push_back(AttrStmt(
+        Integer(0), attr::kAutoScheduleSharedMemoryBoundary, 0, Evaluate(0)));
+
+    // Collect LetDecl info from current segment before converting to Stmt.
+    std::vector<std::vector<std::pair<Var, PrimExpr>>> wg_lets(num_wgs);
+    for (size_t i = 0; i < num_wgs; ++i) {
+      wg_lets[i] = CollectLetDeclInfo(wg_segments[i][si]);
+    }
+    std::vector<Stmt> wg_seg_stmts(num_wgs);
+    for (size_t i = 0; i < num_wgs; ++i) {
+      wg_seg_stmts[i] = SegmentToStmt(wg_segments[i][si]);
+    }
+
+    // For segments after the first, wrap with renamed LetDecl bindings
+    // from all previous segments so that variables remain in scope.
+    if (si > 0) {
+      for (size_t i = 0; i < num_wgs; ++i) {
+        wg_seg_stmts[i] =
+            WrapWithRenamedLetDecls(wg_seg_stmts[i], wg_accumulated_lets[i]);
+      }
+    }
+
+    // Accumulate this segment's LetDecls for future segments.
+    for (size_t i = 0; i < num_wgs; ++i) {
+      wg_accumulated_lets[i].insert(wg_accumulated_lets[i].end(),
+                                    wg_lets[i].begin(), wg_lets[i].end());
+    }
+
+    // Prepend set_max_nreg only to the first segment.
+    if (si == 0 && !has_simt_copy && num_wgs == 2 &&
+        config.enable_set_max_nreg) {
+      for (size_t i = 0; i < num_wgs; ++i) {
+        wg_seg_stmts[i] =
+            SeqStmt({Evaluate(Call(DataType::Handle(), tl::set_max_nreg(),
+                                    {i == 0 ? config.consumer_max_nreg
+                                            : config.producer_max_nreg,
+                                    static_cast<int>(!i)})),
+                      wg_seg_stmts[i]});
+      }
+    }
+
+    segmented_stmts.push_back(MakeWarpgroupIf(wg_seg_stmts));
+  }
+  if_then_else = SeqStmt::Flatten(segmented_stmts);
 
   PrimExpr updated_thread_extent = std::accumulate(
       thread_count.begin() + 1, thread_count.end(), thread_count[0]);
@@ -1270,7 +1288,9 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
     combined_stmt = pro_and_warpgroup_stmt;
   }
 
-  return combined_stmt;
+  return SeqStmt({AttrStmt(Integer(0), attr::kAutoScheduleSharedMemoryBoundary,
+                           0, Evaluate(0)),
+                  combined_stmt});
 }
 
 } // namespace tl
