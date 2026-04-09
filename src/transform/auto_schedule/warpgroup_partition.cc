@@ -440,278 +440,276 @@ private:
   bool has_simt_copy_{false};
 };
 
-Stmt ConvertIRStructureToStmt(IRStructure *root, const bool outer_enable_epi) {
-  std::function<Stmt(IRStructure *)> irstructure_to_stmt;
-  irstructure_to_stmt = [&irstructure_to_stmt,
-                         outer_enable_epi](IRStructure *structure) -> Stmt {
-    if (!structure) {
-      return Evaluate(0);
-    }
+Stmt ConvertIRStructureToStmt(IRStructure *structure,
+                              const bool outer_enable_epi) {
+  if (!structure) {
+    return Evaluate(0);
+  }
 
-    if (structure->IsTask()) {
-      auto task = static_cast<TaskNode *>(structure);
-      if (task->stmts.empty()) {
-        return Evaluate(0);
-      } else if (task->stmts.size() == 1) {
-        return task->stmts[0];
-      } else {
-        return SeqStmt(task->stmts);
+  if (structure->IsTask()) {
+    auto task = static_cast<TaskNode *>(structure);
+    if (task->stmts.empty()) {
+      return Evaluate(0);
+    } else if (task->stmts.size() == 1) {
+      return task->stmts[0];
+    } else {
+      return SeqStmt(task->stmts);
+    }
+  } else if (structure->IsSequence()) {
+    auto seq = static_cast<SequenceNode *>(structure);
+    std::vector<Stmt> stmts;
+    for (const auto &child : seq->children) {
+      auto unit = static_cast<ScheduleUnit *>(child.get());
+      for (auto &[_, before] : unit->before) {
+        for (auto &stmt : before) {
+          stmts.push_back(stmt);
+        }
       }
-    } else if (structure->IsSequence()) {
-      auto seq = static_cast<SequenceNode *>(structure);
-      std::vector<Stmt> stmts;
-      for (const auto &child : seq->children) {
+      Stmt child_stmt =
+          ConvertIRStructureToStmt(unit->child.get(), outer_enable_epi);
+      stmts.push_back(child_stmt);
+      for (auto &[_, after] : unit->after) {
+        for (auto &stmt : after) {
+          stmts.push_back(stmt);
+        }
+      }
+    }
+    auto flattened = SeqStmt::Flatten(stmts);
+    return flattened;
+  } else if (structure->IsControl()) {
+    auto ctrl = static_cast<ControlNode *>(structure);
+    Var loop_var = ctrl->control->loop_var;
+    PrimExpr loop_start = ctrl->control->min;
+    PrimExpr loop_extent = ctrl->control->extent;
+    PrimExpr loop_step = ctrl->control->step.has_value()
+                             ? ctrl->control->step.value()
+                             : IntImm(DataType::Int(32), 1);
+    int min_stages = 100, max_stages = -1;
+    if (ctrl->child->IsSequence()) {
+      auto seq = static_cast<SequenceNode *>(ctrl->child.get());
+      for (auto &child : seq->children) {
         auto unit = static_cast<ScheduleUnit *>(child.get());
+        min_stages = std::min(min_stages, unit->stage);
+        max_stages = std::max(max_stages, unit->stage);
+      }
+    }
+    if (!ctrl->hasPromote() || !ctrl->child->IsSequence() ||
+        min_stages == max_stages) {
+      std::vector<Stmt> stmts;
+      if (ctrl->child->IsScheduleUnit()) {
+        auto unit = static_cast<ScheduleUnit *>(ctrl->child.get());
         for (auto &[_, before] : unit->before) {
           for (auto &stmt : before) {
             stmts.push_back(stmt);
           }
         }
-        Stmt child_stmt = irstructure_to_stmt(unit->child.get());
-        stmts.push_back(child_stmt);
+        stmts.push_back(
+            ConvertIRStructureToStmt(unit->child.get(), outer_enable_epi));
         for (auto &[_, after] : unit->after) {
           for (auto &stmt : after) {
             stmts.push_back(stmt);
           }
         }
-      }
-      auto flattened = SeqStmt::Flatten(stmts);
-      return flattened;
-    } else if (structure->IsControl()) {
-      auto ctrl = static_cast<ControlNode *>(structure);
-      Var loop_var = ctrl->control->loop_var;
-      PrimExpr loop_start = ctrl->control->min;
-      PrimExpr loop_extent = ctrl->control->extent;
-      PrimExpr loop_step = ctrl->control->step.has_value()
-                               ? ctrl->control->step.value()
-                               : IntImm(DataType::Int(32), 1);
-      int min_stages = 100, max_stages = -1;
-      if (ctrl->child->IsSequence()) {
+      } else if (ctrl->child->IsSequence()) {
         auto seq = static_cast<SequenceNode *>(ctrl->child.get());
         for (auto &child : seq->children) {
+          ICHECK(child->IsScheduleUnit());
           auto unit = static_cast<ScheduleUnit *>(child.get());
-          min_stages = std::min(min_stages, unit->stage);
-          max_stages = std::max(max_stages, unit->stage);
-        }
-      }
-      if (!ctrl->hasPromote() || !ctrl->child->IsSequence() ||
-          min_stages == max_stages) {
-        std::vector<Stmt> stmts;
-        if (ctrl->child->IsScheduleUnit()) {
-          auto unit = static_cast<ScheduleUnit *>(ctrl->child.get());
           for (auto &[_, before] : unit->before) {
             for (auto &stmt : before) {
               stmts.push_back(stmt);
             }
           }
-          stmts.push_back(irstructure_to_stmt(unit->child.get()));
+          stmts.push_back(
+              ConvertIRStructureToStmt(unit->child.get(), outer_enable_epi));
           for (auto &[_, after] : unit->after) {
             for (auto &stmt : after) {
               stmts.push_back(stmt);
             }
           }
-        } else if (ctrl->child->IsSequence()) {
-          auto seq = static_cast<SequenceNode *>(ctrl->child.get());
-          for (auto &child : seq->children) {
-            ICHECK(child->IsScheduleUnit());
-            auto unit = static_cast<ScheduleUnit *>(child.get());
-            for (auto &[_, before] : unit->before) {
-              for (auto &stmt : before) {
-                stmts.push_back(stmt);
-              }
-            }
-            stmts.push_back(irstructure_to_stmt(unit->child.get()));
-            for (auto &[_, after] : unit->after) {
-              for (auto &stmt : after) {
-                stmts.push_back(stmt);
-              }
-            }
-          }
-        } else {
-          LOG(FATAL);
         }
-        Stmt body = SeqStmt::Flatten(stmts);
-        // Filter out "num_stages" annotation
-        Map<String, Any> filtered_annotations = ctrl->control->annotations;
-        filtered_annotations.erase("num_stages");
-        return For(loop_var, loop_start, loop_extent, ctrl->control->kind, body,
-                   ctrl->control->thread_binding, filtered_annotations);
-      }
-      auto seq = static_cast<SequenceNode *>(ctrl->child.get());
-      Stmt body = Evaluate(0);
-      std::vector<std::vector<Stmt>> unit_stages;
-      unit_stages.resize(max_stages - min_stages + 1);
-      for (auto &child : seq->children) {
-        auto unit = static_cast<ScheduleUnit *>(child.get());
-        std::vector<Stmt> stmts;
-        for (const auto &[_, before] : unit->before) {
-          for (const auto &stmt : before) {
-            stmts.push_back(stmt);
-          }
-        }
-        stmts.push_back(irstructure_to_stmt(unit->child.get()));
-        for (const auto &[_, after] : unit->after) {
-          for (const auto &stmt : after) {
-            stmts.push_back(stmt);
-          }
-        }
-        unit_stages[unit->stage - min_stages].push_back(
-            SeqStmt::Flatten(stmts));
-      }
-      // Check if any task in this control node contains loop_break
-      // If any task contains loop_break, disable prologue
-      std::function<bool(IRStructure *)> check_contains_loop_break;
-      check_contains_loop_break =
-          [&check_contains_loop_break](IRStructure *structure) -> bool {
-        if (!structure)
-          return false;
-
-        if (structure->IsTask()) {
-          auto task = static_cast<TaskNode *>(structure);
-          return task->ContainsLoopBreak();
-        } else if (structure->IsSequence()) {
-          auto seq = static_cast<SequenceNode *>(structure);
-          for (const auto &child : seq->children) {
-            auto unit = static_cast<ScheduleUnit *>(child.get());
-            if (check_contains_loop_break(unit->child.get())) {
-              return true;
-            }
-          }
-          return false;
-        } else if (structure->IsScheduleUnit()) {
-          auto unit = static_cast<ScheduleUnit *>(structure);
-          return check_contains_loop_break(unit->child.get());
-        } else if (structure->IsControl()) {
-          auto ctrl = static_cast<ControlNode *>(structure);
-          return check_contains_loop_break(ctrl->child.get());
-        } else if (structure->IsWrapper()) {
-          auto wrapper = static_cast<WrapperNode *>(structure);
-          return check_contains_loop_break(wrapper->child.get());
-        }
-        return false;
-      };
-
-      // Set enable_pro to true only if:
-      // 1. No task contains loop_break
-      // 2. Loop boundaries (min and extent) are constants
-      bool enable_pro = !check_contains_loop_break(ctrl->child.get());
-
-      // Check if loop boundaries are constants
-      bool loop_min_is_const = tir::is_const_int(loop_start);
-      bool loop_extent_is_const = tir::is_const_int(loop_extent);
-
-      if (!loop_min_is_const || !loop_extent_is_const) {
-        enable_pro = false;
-      }
-
-      bool enable_epi = outer_enable_epi && enable_pro;
-      std::vector<Stmt> steady;
-
-      for (auto &child : seq->children) {
-        auto unit = static_cast<ScheduleUnit *>(child.get());
-        std::vector<Stmt> stmts;
-        for (const auto &[_, before] : unit->before) {
-          for (const auto &stmt : before) {
-            stmts.push_back(stmt);
-          }
-        }
-        stmts.push_back(irstructure_to_stmt(unit->child.get()));
-        for (const auto &[_, after] : unit->after) {
-          for (const auto &stmt : after) {
-            stmts.push_back(stmt);
-          }
-        }
-        Map<Var, PrimExpr> substitution, substitution_cond;
-        substitution.Set(loop_var,
-                         loop_var - loop_step * (max_stages - unit->stage));
-        substitution_cond.Set(
-            loop_var,
-            Max(loop_start,
-                Min(loop_start + loop_extent - loop_step,
-                    loop_var - loop_step * (max_stages - unit->stage))));
-        if (IsLetDeclNode(unit->child.get())) {
-          Stmt stmt = SeqStmt::Flatten(stmts);
-          steady.push_back(Substitute(stmt, substitution_cond));
-        } else {
-          PrimExpr condition =
-              And(loop_var < loop_start + loop_extent, loop_var >= loop_start);
-          if (unit->stage == min_stages) {
-            condition = loop_var >= loop_start;
-          }
-          if (unit->stage == max_stages) {
-            condition = loop_var < loop_start + loop_extent;
-          }
-          Stmt stmt = IfThenElse(condition, SeqStmt::Flatten(stmts));
-          steady.push_back(Substitute(stmt, substitution));
-        }
-      }
-      Stmt new_body = SeqStmt::Flatten(steady);
-      auto new_var = loop_var.copy_with_suffix("");
-      // Filter out "num_stages" annotation
-      Map<String, Any> filtered_annotations = ctrl->control->annotations;
-      filtered_annotations.erase("num_stages");
-      Map<Var, PrimExpr> substitution;
-      substitution.Set(loop_var, new_var);
-      For for_op =
-          For(new_var, loop_start,
-              ctrl->control->extent + loop_step * (max_stages - min_stages),
-              ctrl->control->kind, Substitute(new_body, substitution),
-              ctrl->control->thread_binding, filtered_annotations);
-
-      Stmt prologue = Evaluate(0);
-      if (enable_pro) {
-        Map<Var, PrimExpr> sub;
-        For new_for = for_op;
-        auto pro = loop_var.copy_with_suffix("_prologue");
-        sub.Set(new_var, pro);
-        new_for.CopyOnWrite()->loop_var = pro;
-        new_for.CopyOnWrite()->kind = ForKind::kUnrolled;
-        new_for.CopyOnWrite()->extent =
-            min(max_stages - min_stages, for_op.get()->extent);
-        for_op.CopyOnWrite()->min += loop_step * (max_stages - min_stages);
-        for_op.CopyOnWrite()->extent =
-            max(0, for_op.get()->extent - (max_stages - min_stages));
-        prologue = Substitute(new_for, sub);
-      }
-      Stmt epilogue = Evaluate(0);
-      if (enable_epi) {
-        Map<Var, PrimExpr> sub;
-        For new_for = for_op;
-        auto epi = loop_var.copy_with_suffix("_epilogue");
-        sub.Set(new_var, epi);
-        new_for.CopyOnWrite()->loop_var = epi;
-        new_for.CopyOnWrite()->kind = ForKind::kUnrolled;
-        new_for.CopyOnWrite()->min =
-            for_op.get()->min +
-            loop_step * (for_op.get()->extent - (max_stages - min_stages));
-        new_for.CopyOnWrite()->extent =
-            min(max_stages - min_stages, for_op.get()->extent);
-        for_op.CopyOnWrite()->extent =
-            max(0, for_op.get()->extent - (max_stages - min_stages));
-        epilogue = Substitute(new_for, sub);
-      }
-      return SeqStmt({prologue, for_op, epilogue});
-    } else if (structure->IsWrapper()) {
-      auto wrapper = static_cast<const WrapperNode *>(structure);
-      Stmt body = Evaluate(0);
-      if (wrapper->child) {
-        body = irstructure_to_stmt(wrapper->child.get());
-      }
-      if (const auto *let = wrapper->wrapper.as<LetStmtNode>()) {
-        return LetStmt(let->var, let->value, body);
-      } else if (const auto *attr = wrapper->wrapper.as<AttrStmtNode>()) {
-        return AttrStmt(attr->node, attr->attr_key, attr->value, body);
       } else {
         LOG(FATAL);
       }
+      Stmt body = SeqStmt::Flatten(stmts);
+      // Filter out "num_stages" annotation
+      Map<String, Any> filtered_annotations = ctrl->control->annotations;
+      filtered_annotations.erase("num_stages");
+      return For(loop_var, loop_start, loop_extent, ctrl->control->kind, body,
+                 ctrl->control->thread_binding, filtered_annotations);
+    }
+    auto seq = static_cast<SequenceNode *>(ctrl->child.get());
+    Stmt body = Evaluate(0);
+    std::vector<std::vector<Stmt>> unit_stages;
+    unit_stages.resize(max_stages - min_stages + 1);
+    for (auto &child : seq->children) {
+      auto unit = static_cast<ScheduleUnit *>(child.get());
+      std::vector<Stmt> stmts;
+      for (const auto &[_, before] : unit->before) {
+        for (const auto &stmt : before) {
+          stmts.push_back(stmt);
+        }
+      }
+      stmts.push_back(
+          ConvertIRStructureToStmt(unit->child.get(), outer_enable_epi));
+      for (const auto &[_, after] : unit->after) {
+        for (const auto &stmt : after) {
+          stmts.push_back(stmt);
+        }
+      }
+      unit_stages[unit->stage - min_stages].push_back(SeqStmt::Flatten(stmts));
+    }
+    // Check if any task in this control node contains loop_break
+    // If any task contains loop_break, disable prologue
+    std::function<bool(IRStructure *)> check_contains_loop_break;
+    check_contains_loop_break =
+        [&check_contains_loop_break](IRStructure *structure) -> bool {
+      if (!structure)
+        return false;
+
+      if (structure->IsTask()) {
+        auto task = static_cast<TaskNode *>(structure);
+        return task->ContainsLoopBreak();
+      } else if (structure->IsSequence()) {
+        auto seq = static_cast<SequenceNode *>(structure);
+        for (const auto &child : seq->children) {
+          auto unit = static_cast<ScheduleUnit *>(child.get());
+          if (check_contains_loop_break(unit->child.get())) {
+            return true;
+          }
+        }
+        return false;
+      } else if (structure->IsScheduleUnit()) {
+        auto unit = static_cast<ScheduleUnit *>(structure);
+        return check_contains_loop_break(unit->child.get());
+      } else if (structure->IsControl()) {
+        auto ctrl = static_cast<ControlNode *>(structure);
+        return check_contains_loop_break(ctrl->child.get());
+      } else if (structure->IsWrapper()) {
+        auto wrapper = static_cast<WrapperNode *>(structure);
+        return check_contains_loop_break(wrapper->child.get());
+      }
+      return false;
+    };
+
+    // Set enable_pro to true only if:
+    // 1. No task contains loop_break
+    // 2. Loop boundaries (min and extent) are constants
+    bool enable_pro = !check_contains_loop_break(ctrl->child.get());
+
+    // Check if loop boundaries are constants
+    bool loop_min_is_const = tir::is_const_int(loop_start);
+    bool loop_extent_is_const = tir::is_const_int(loop_extent);
+
+    if (!loop_min_is_const || !loop_extent_is_const) {
+      enable_pro = false;
     }
 
-    LOG(FATAL)
-        << "Failed to convert IRStructure to Stmt, returning empty statement";
-    return Evaluate(0);
-  };
+    bool enable_epi = outer_enable_epi && enable_pro;
+    std::vector<Stmt> steady;
 
-  return irstructure_to_stmt(root);
+    for (auto &child : seq->children) {
+      auto unit = static_cast<ScheduleUnit *>(child.get());
+      std::vector<Stmt> stmts;
+      for (const auto &[_, before] : unit->before) {
+        for (const auto &stmt : before) {
+          stmts.push_back(stmt);
+        }
+      }
+      stmts.push_back(
+          ConvertIRStructureToStmt(unit->child.get(), outer_enable_epi));
+      for (const auto &[_, after] : unit->after) {
+        for (const auto &stmt : after) {
+          stmts.push_back(stmt);
+        }
+      }
+      Map<Var, PrimExpr> substitution, substitution_cond;
+      substitution.Set(loop_var,
+                       loop_var - loop_step * (max_stages - unit->stage));
+      substitution_cond.Set(
+          loop_var, Max(loop_start, Min(loop_start + loop_extent - loop_step,
+                                        loop_var - loop_step * (max_stages -
+                                                                unit->stage))));
+      if (IsLetDeclNode(unit->child.get())) {
+        Stmt stmt = SeqStmt::Flatten(stmts);
+        steady.push_back(Substitute(stmt, substitution_cond));
+      } else {
+        PrimExpr condition =
+            And(loop_var < loop_start + loop_extent, loop_var >= loop_start);
+        if (unit->stage == min_stages) {
+          condition = loop_var >= loop_start;
+        }
+        if (unit->stage == max_stages) {
+          condition = loop_var < loop_start + loop_extent;
+        }
+        Stmt stmt = IfThenElse(condition, SeqStmt::Flatten(stmts));
+        steady.push_back(Substitute(stmt, substitution));
+      }
+    }
+    Stmt new_body = SeqStmt::Flatten(steady);
+    auto new_var = loop_var.copy_with_suffix("");
+    // Filter out "num_stages" annotation
+    Map<String, Any> filtered_annotations = ctrl->control->annotations;
+    filtered_annotations.erase("num_stages");
+    Map<Var, PrimExpr> substitution;
+    substitution.Set(loop_var, new_var);
+    For for_op =
+        For(new_var, loop_start,
+            ctrl->control->extent + loop_step * (max_stages - min_stages),
+            ctrl->control->kind, Substitute(new_body, substitution),
+            ctrl->control->thread_binding, filtered_annotations);
+
+    Stmt prologue = Evaluate(0);
+    if (enable_pro) {
+      Map<Var, PrimExpr> sub;
+      For new_for = for_op;
+      auto pro = loop_var.copy_with_suffix("_prologue");
+      sub.Set(new_var, pro);
+      new_for.CopyOnWrite()->loop_var = pro;
+      new_for.CopyOnWrite()->kind = ForKind::kUnrolled;
+      new_for.CopyOnWrite()->extent =
+          min(max_stages - min_stages, for_op.get()->extent);
+      for_op.CopyOnWrite()->min += loop_step * (max_stages - min_stages);
+      for_op.CopyOnWrite()->extent =
+          max(0, for_op.get()->extent - (max_stages - min_stages));
+      prologue = Substitute(new_for, sub);
+    }
+    Stmt epilogue = Evaluate(0);
+    if (enable_epi) {
+      Map<Var, PrimExpr> sub;
+      For new_for = for_op;
+      auto epi = loop_var.copy_with_suffix("_epilogue");
+      sub.Set(new_var, epi);
+      new_for.CopyOnWrite()->loop_var = epi;
+      new_for.CopyOnWrite()->kind = ForKind::kUnrolled;
+      new_for.CopyOnWrite()->min =
+          for_op.get()->min +
+          loop_step * (for_op.get()->extent - (max_stages - min_stages));
+      new_for.CopyOnWrite()->extent =
+          min(max_stages - min_stages, for_op.get()->extent);
+      for_op.CopyOnWrite()->extent =
+          max(0, for_op.get()->extent - (max_stages - min_stages));
+      epilogue = Substitute(new_for, sub);
+    }
+    return SeqStmt({prologue, for_op, epilogue});
+  } else if (structure->IsWrapper()) {
+    auto wrapper = static_cast<const WrapperNode *>(structure);
+    Stmt body = Evaluate(0);
+    if (wrapper->child) {
+      body = ConvertIRStructureToStmt(wrapper->child.get(), outer_enable_epi);
+    }
+    if (const auto *let = wrapper->wrapper.as<LetStmtNode>()) {
+      return LetStmt(let->var, let->value, body);
+    } else if (const auto *attr = wrapper->wrapper.as<AttrStmtNode>()) {
+      return AttrStmt(attr->node, attr->attr_key, attr->value, body);
+    } else {
+      LOG(FATAL);
+    }
+  }
+
+  LOG(FATAL)
+      << "Failed to convert IRStructure to Stmt, returning empty statement";
+  return Evaluate(0);
 }
 
 // Apply warpgroup partition to entire IRStructure (top-level IfThenElse)
@@ -860,30 +858,68 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
     return nullptr;
   };
 
-  int last_warpgroup_task_top_level_index = -1;
+  // Determine which top-level neutral children should be epi (run after
+  // warpgroup-partitioned code). A neutral child is epi if it directly or
+  // transitively depends on warpgroup task output.
+  std::unordered_set<const Object *> wg_write_buffers;
+  std::unordered_set<int> depends_on_wg_output;
+  // Per-child write buffers and read buffers for neutral children
+  struct ChildBufferInfo {
+    std::unordered_set<const Object *> read_bufs;
+    std::unordered_set<const Object *> write_bufs;
+    bool all_neutral = true;
+  };
+  std::vector<ChildBufferInfo> child_infos;
   if (root->IsSequence()) {
     auto seq = static_cast<SequenceNode *>(root);
+    child_infos.resize(seq->children.size());
     for (size_t i = 0; i < seq->children.size(); ++i) {
       const auto &child = seq->children[i];
-      if (!child) {
+      if (!child)
         continue;
-      }
       auto unit = static_cast<ScheduleUnit *>(child.get());
       std::vector<TaskNodeWithContext> child_tasks;
       CollectAllTaskNodesWithContext(unit->child.get(), child_tasks);
+      auto &info = child_infos[i];
       for (const auto &task : child_tasks) {
         if (task.task->GetWarpgroupId() >= 0) {
-          last_warpgroup_task_top_level_index = static_cast<int>(i);
+          info.all_neutral = false;
+          for (const auto &wr : task.task->GetWriteRegions())
+            wg_write_buffers.insert(wr->buffer.get());
+        }
+        for (const auto &rd : task.task->GetReadRegions())
+          info.read_bufs.insert(rd->buffer.get());
+        for (const auto &wr : task.task->GetWriteRegions())
+          info.write_bufs.insert(wr->buffer.get());
+      }
+    }
+    // Transitive fixpoint: if a neutral child reads from wg_write_buffers,
+    // mark it as epi and add its write buffers to wg_write_buffers so that
+    // other neutral children that depend on it are also marked epi.
+    bool changed = true;
+    while (changed) {
+      changed = false;
+      for (size_t i = 0; i < child_infos.size(); ++i) {
+        if (!child_infos[i].all_neutral)
+          continue;
+        if (depends_on_wg_output.count(static_cast<int>(i)))
+          continue;
+        for (const auto *buf : child_infos[i].read_bufs) {
+          if (wg_write_buffers.count(buf)) {
+            depends_on_wg_output.insert(static_cast<int>(i));
+            for (const auto *wb : child_infos[i].write_bufs)
+              wg_write_buffers.insert(wb);
+            changed = true;
+            break;
+          }
         }
       }
     }
   }
 
-  auto is_epi_top_level_index =
-      [last_warpgroup_task_top_level_index](int top_level_index) {
-        return last_warpgroup_task_top_level_index >= 0 &&
-               top_level_index > last_warpgroup_task_top_level_index;
-      };
+  auto is_epi_top_level_index = [&depends_on_wg_output](int top_level_index) {
+    return depends_on_wg_output.count(top_level_index) > 0;
+  };
   auto is_pro_top_level_index = [is_epi_top_level_index](int top_level_index) {
     return !is_epi_top_level_index(top_level_index);
   };
@@ -961,7 +997,7 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
   // Helper: wrap a list of ScheduleUnit children back into a temporary
   // SequenceNode and convert to Stmt.
   auto SegmentToStmt =
-      [&outer_enable_epi](
+      [outer_enable_epi](
           const std::vector<std::shared_ptr<IRStructure>> &children) -> Stmt {
     if (children.empty())
       return Evaluate(0);
