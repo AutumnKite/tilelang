@@ -52,6 +52,9 @@ std::vector<PrimExpr>
 AssignWarpgroupIdsGlobal(IRStructure *root, const WarpSpecializeConfig &config,
                          PrimExpr thread_count);
 
+// Naive warpgroup assignment: TMA→wg1, compute→wg0, neutral→-1
+bool NaiveAssignWarpgroupIds(IRStructure *root);
+
 // Extract all sequential task nodes from the IR structure tree
 void GatherTaskNodes(const std::vector<std::shared_ptr<IRStructure>> &nodes,
                      std::vector<std::shared_ptr<IRStructure>> &task_nodes);
@@ -99,10 +102,20 @@ public:
                                     thread_var_->dom->extent);
   }
 
+  // Naive build: preserve original order, assign pipeline stages based on
+  // num_stages annotation, assign warpgroup IDs by resource type
+  // (TMA→wg1, compute→wg0). No Z3 scheduling.
+  bool NaiveBuild(std::shared_ptr<IRStructure> &root);
+
   // New recursive scheduling function that replaces Collect method
   // Directly schedules the entire IRStructure tree recursively in place
   void ScheduleRecursive(std::shared_ptr<IRStructure> &node,
                          const std::set<Buffer> &used_buffers);
+
+  // Naive recursive scheduling: wrap children in ScheduleUnits preserving
+  // original order, assign pipeline stages based on num_stages annotation
+  void NaiveScheduleRecursive(std::shared_ptr<IRStructure> &node);
+  void NaiveScheduleLoop(ControlNode *ctrl);
 
   // Z3-based scheduler that calls Python implementation via FFI
   std::vector<IRStructure *>

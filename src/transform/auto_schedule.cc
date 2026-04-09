@@ -603,11 +603,9 @@ tvm::transform::Pass AutoSchedule(const bool enable_epi) {
     // Print the built IRStructure with all statements
     ICHECK(ir_structure) << "IRStructure is null (empty body?)";
 
-    // First print the summary view
-    // PrintIRStructure(ir_structure.get());
-
-    // Then print all statements
-    // PrintAllStmts(ir_structure.get());
+    // Check if aggressive auto-schedule is enabled
+    bool aggressive =
+        ctx->GetConfig<Bool>(kEnableAggressiveAutoSchedule, Bool(true)).value();
 
     // Build ScheduleUnits from IRStructure
     ScheduleUnitBuilder unit_builder;
@@ -619,7 +617,13 @@ tvm::transform::Pass AutoSchedule(const bool enable_epi) {
     }
     unit_builder.SetWarpSpecializeConfig(config);
     unit_builder.SetSharedMemoryLimit(GetSharedMemoryLimit(target));
-    std::vector<PrimExpr> thread_count = unit_builder.Build(ir_structure);
+
+    std::vector<PrimExpr> thread_count;
+    if (!aggressive) {
+      thread_count = unit_builder.NaiveBuild(ir_structure);
+    } else {
+      thread_count = unit_builder.Build(ir_structure);
+    }
 
     if (!config.enable_warpgroup_partition) {
       Stmt new_body = ConvertIRStructureToStmt(ir_structure.get(), enable_epi);
