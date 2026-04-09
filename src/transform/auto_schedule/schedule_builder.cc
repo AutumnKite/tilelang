@@ -324,6 +324,28 @@ AssignWarpgroupIdsGlobal(IRStructure *root, const WarpSpecializeConfig &config,
             [](const ComponentInfo &a, const ComponentInfo &b) {
               return a.weighted_latency > b.weighted_latency;
             });
+  
+  if (config.enable_warp_partition) {
+    for (const auto &comp : component_infos) {
+      int assigned_warpgroup = 0;
+      if (comp.uses_tensor_core_ && !comp.uses_tma_core_) {
+        assigned_warpgroup = 0;
+      } else if (!comp.uses_tensor_core_ && comp.uses_tma_core_) {
+        assigned_warpgroup = 1;
+      } else {
+        assigned_warpgroup = 3;
+      }
+      for (int idx : comp.task_indices) {
+        TaskNode *task = all_tasks[idx].task;
+        if (!task->ContainsLoopBreak()) {
+          task->SetWarpgroupId(assigned_warpgroup);
+        }
+      }
+    }
+    return {IntImm(DataType::Int(32), 32), IntImm(DataType::Int(32), 32),
+            IntImm(DataType::Int(32), 64),
+            thread_count - IntImm(DataType::Int(32), 128)};
+  }
 
   int64_t warpgroup0_latency = 0;
   int64_t warpgroup1_latency = 0;
@@ -362,12 +384,7 @@ AssignWarpgroupIdsGlobal(IRStructure *root, const WarpSpecializeConfig &config,
         }
       }
     }
-    if (config.enable_thread_extend) {
-      return {thread_count, thread_count};
-    } else {
-      return {IntImm(DataType::Int(32), 32), IntImm(DataType::Int(32), 32),
-              thread_count - IntImm(DataType::Int(32), 64)};
-    }
+    return {thread_count, thread_count};
   } else {
     int64_t warpgroup0_latency = 0;
     int64_t warpgroup1_latency = 0;
@@ -394,13 +411,8 @@ AssignWarpgroupIdsGlobal(IRStructure *root, const WarpSpecializeConfig &config,
         }
       }
     }
-    if (config.enable_thread_extend) {
-      return {thread_count,
-              IntImm(DataType::Int(32), config.producer_thread_count)};
-    } else {
-      return {IntImm(DataType::Int(32), 32), IntImm(DataType::Int(32), 32),
-              thread_count - IntImm(DataType::Int(32), 64)};
-    }
+    return {thread_count,
+            IntImm(DataType::Int(32), config.producer_thread_count)};
   }
 }
 
