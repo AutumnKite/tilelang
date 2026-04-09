@@ -684,7 +684,8 @@ void ScheduleUnitBuilder::ScheduleRecursive(
 
 // --- Naive scheduling implementation ---
 
-bool NaiveAssignWarpgroupIds(IRStructure *root) {
+std::vector<PrimExpr> NaiveAssignWarpgroupIds(IRStructure *root, const WarpSpecializeConfig &config,
+                         PrimExpr thread_count) {
   if (!root)
     LOG(FATAL) << "Empty root";
 
@@ -730,7 +731,14 @@ bool NaiveAssignWarpgroupIds(IRStructure *root) {
     task->SetWarpgroupId(-1);
   }
 
-  return false; // no double_thread in naive mode
+  // no double_thread in naive mode
+  if (config.enable_thread_extend) {
+    return {thread_count,
+            IntImm(DataType::Int(32), config.producer_thread_count)};
+  } else {
+    return {IntImm(DataType::Int(32), 32), IntImm(DataType::Int(32), 32),
+            thread_count - IntImm(DataType::Int(32), 64)};
+  }
 }
 
 void ScheduleUnitBuilder::NaiveScheduleLoop(ControlNode *ctrl) {
@@ -867,9 +875,9 @@ void ScheduleUnitBuilder::NaiveScheduleRecursive(
   }
 }
 
-bool ScheduleUnitBuilder::NaiveBuild(std::shared_ptr<IRStructure> &root) {
+std::vector<PrimExpr> ScheduleUnitBuilder::NaiveBuild(std::shared_ptr<IRStructure> &root) {
   NaiveScheduleRecursive(root);
-  return NaiveAssignWarpgroupIds(root.get());
+  return NaiveAssignWarpgroupIds(root.get(), config_, thread_var_->dom->extent);
 }
 
 } // namespace tl
