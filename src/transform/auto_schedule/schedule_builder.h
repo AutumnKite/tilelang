@@ -626,7 +626,7 @@ public:
   // Set thread index variable for warpgroup partition
   void SetThreadVar(IterVar thread_var) { thread_var_ = thread_var; }
 
-  // Set enable_warp_partition flag
+  // Set warp specialization configuration
   void SetWarpSpecializeConfig(const WarpSpecializeConfig &config) {
     config_ = config;
   }

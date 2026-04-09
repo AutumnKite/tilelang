@@ -437,7 +437,7 @@ AssignWarpgroupIdsGlobal(IRStructure *root, const WarpSpecializeConfig &config,
             [](const ComponentInfo &a, const ComponentInfo &b) {
               return a.weighted_latency > b.weighted_latency;
             });
-  
+
   if (config.enable_warp_partition) {
     for (const auto &comp : component_infos) {
       int assigned_warpgroup = 0;

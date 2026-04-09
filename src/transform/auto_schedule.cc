@@ -617,7 +617,7 @@ tvm::transform::Pass AutoSchedule(const bool enable_epi) {
       LOG(FATAL) << "Could not find thread index variable, warpgroup "
                     "partition will use default";
     }
-    unit_builder.SetWarpSpeicializeConfig(config);
+    unit_builder.SetWarpSpecializeConfig(config);
     unit_builder.SetSharedMemoryLimit(GetSharedMemoryLimit(target));
     std::vector<PrimExpr> thread_count = unit_builder.Build(ir_structure);
 
