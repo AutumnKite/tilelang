@@ -587,7 +587,7 @@ def main(batch=1, heads=64, kv_heads=1, kv_ctx=1024, dim=512, pe_dim=64):
 
     configs = [
         (flashattn_auto, "auto_schedule"),
-        (flashattn_manual, "manual"),
+        # (flashattn_manual, "manual"), # manual schedule is not needed
         (flashattn_warp_specialize, "warp_specialize"),
     ]
 
