@@ -53,8 +53,9 @@ AssignWarpgroupIdsGlobal(IRStructure *root, const WarpSpecializeConfig &config,
                          PrimExpr thread_count);
 
 // Naive warpgroup assignment: TMA→wg1, compute→wg0, neutral→-1
-std::vector<PrimExpr> NaiveAssignWarpgroupIds(IRStructure *root, const WarpSpecializeConfig &config,
-                         PrimExpr thread_count);
+std::vector<PrimExpr>
+NaiveAssignWarpgroupIds(IRStructure *root, const WarpSpecializeConfig &config,
+                        PrimExpr thread_count);
 
 // Extract all sequential task nodes from the IR structure tree
 void GatherTaskNodes(const std::vector<std::shared_ptr<IRStructure>> &nodes,

@@ -684,8 +684,9 @@ void ScheduleUnitBuilder::ScheduleRecursive(
 
 // --- Naive scheduling implementation ---
 
-std::vector<PrimExpr> NaiveAssignWarpgroupIds(IRStructure *root, const WarpSpecializeConfig &config,
-                         PrimExpr thread_count) {
+std::vector<PrimExpr>
+NaiveAssignWarpgroupIds(IRStructure *root, const WarpSpecializeConfig &config,
+                        PrimExpr thread_count) {
   if (!root)
     LOG(FATAL) << "Empty root";
 
@@ -875,7 +876,8 @@ void ScheduleUnitBuilder::NaiveScheduleRecursive(
   }
 }
 
-std::vector<PrimExpr> ScheduleUnitBuilder::NaiveBuild(std::shared_ptr<IRStructure> &root) {
+std::vector<PrimExpr>
+ScheduleUnitBuilder::NaiveBuild(std::shared_ptr<IRStructure> &root) {
   NaiveScheduleRecursive(root);
   return NaiveAssignWarpgroupIds(root.get(), config_, thread_var_->dom->extent);
 }

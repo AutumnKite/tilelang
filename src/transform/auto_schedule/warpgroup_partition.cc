@@ -1146,9 +1146,8 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
             pending.clear();
           } else {
             // Non-Control segment: accumulate for merging
-            pending.insert(pending.end(),
-                            std::make_move_iterator(seg.begin()),
-                            std::make_move_iterator(seg.end()));
+            pending.insert(pending.end(), std::make_move_iterator(seg.begin()),
+                           std::make_move_iterator(seg.end()));
           }
         }
         // Trailing non-Control segments: append to last merged segment
@@ -1211,10 +1210,10 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
       for (size_t i = 0; i < num_wgs; ++i) {
         wg_seg_stmts[i] =
             SeqStmt({Evaluate(Call(DataType::Handle(), tl::set_max_nreg(),
-                                    {i == 0 ? config.consumer_max_nreg
-                                            : config.producer_max_nreg,
+                                   {i == 0 ? config.consumer_max_nreg
+                                           : config.producer_max_nreg,
                                     static_cast<int>(!i)})),
-                      wg_seg_stmts[i]});
+                     wg_seg_stmts[i]});
       }
     }
 

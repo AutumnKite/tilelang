@@ -629,9 +629,8 @@ AnalyzeSequenceNodeBarriers(SequenceNode *seq, int &next_barrier_id,
           if (it->second <= wait_wgmma_id[wg_id])
             continue;
           wait_wgmma_id[wg_id] = it->second;
-          Stmt wait_stmt =
-              Evaluate(Call(DataType::Handle(), wait_wgmma(),
-                            {total_wgmma[wg_id] - it->second}));
+          Stmt wait_stmt = Evaluate(Call(DataType::Handle(), wait_wgmma(),
+                                         {total_wgmma[wg_id] - it->second}));
           InsertStatementIntoScheduleUnit(task, wait_stmt, true, wg_id);
         }
       }
@@ -649,8 +648,8 @@ AnalyzeSequenceNodeBarriers(SequenceNode *seq, int &next_barrier_id,
         int barrier_id = next_barrier_id++;
         // Create a single barrier buffer with shape (1,)
         Buffer barrier_buffer = makeBarrierBuffer(
-            1, "tcgen05_barrier_" + std::to_string(barrier_id),
-            1, barrier_buffers, barrier_map);
+            1, "tcgen05_barrier_" + std::to_string(barrier_id), 1,
+            barrier_buffers, barrier_map);
         barrier_unit_map[task] = barrier_buffer;
 
         // Rewrite the gemm call's mbar argument (arg[16]) to use
@@ -670,14 +669,12 @@ AnalyzeSequenceNodeBarriers(SequenceNode *seq, int &next_barrier_id,
         int wg_id = child->GetWarpgroupId();
         if (wg_id != -1) {
           int barrier_id = next_barrier_id++;
-          Buffer barrier_buffer =
-              makeBarrierBuffer(thread_count[wg_id],
-                                "tma_barrier_" + std::to_string(barrier_id),
-                                1, barrier_buffers, barrier_map);
+          Buffer barrier_buffer = makeBarrierBuffer(
+              thread_count[wg_id], "tma_barrier_" + std::to_string(barrier_id),
+              1, barrier_buffers, barrier_map);
           barrier_unit_map[task] = barrier_buffer;
 
-          PrimExpr barrier_load =
-              BufferLoad(barrier_buffer, {0});
+          PrimExpr barrier_load = BufferLoad(barrier_buffer, {0});
           RewriteCopyMbar(child, barrier_load);
           Stmt arrive_stmt = makeBarrierArrive(barrier_load);
           InsertStatementIntoScheduleUnit(task, arrive_stmt, false, wg_id);
@@ -726,16 +723,16 @@ AnalyzeSequenceNodeBarriers(SequenceNode *seq, int &next_barrier_id,
           if (barrier_unit_map.find(last_task) == barrier_unit_map.end()) {
             // Allocate a new barrier buffer
             int barrier_id = next_barrier_id++;
-            Buffer barrier_buffer = makeBarrierBuffer(
-                thread_count[last_wg_id],
-                "barrier_" + std::to_string(barrier_id), 1,
-                barrier_buffers, barrier_map);
+            Buffer barrier_buffer =
+                makeBarrierBuffer(thread_count[last_wg_id],
+                                  "barrier_" + std::to_string(barrier_id), 1,
+                                  barrier_buffers, barrier_map);
             barrier_unit_map[last_task] = barrier_buffer;
-            PrimExpr barrier_load =
-                BufferLoad(barrier_buffer, {0});
+            PrimExpr barrier_load = BufferLoad(barrier_buffer, {0});
             // Insert barrier_arrive at the end of last_task's statements
             Stmt arrive_stmt = makeBarrierArrive(barrier_load);
-            InsertStatementIntoScheduleUnit(last_task, arrive_stmt, false, last_wg_id);
+            InsertStatementIntoScheduleUnit(last_task, arrive_stmt, false,
+                                            last_wg_id);
           }
           auto barrier_buffer = barrier_unit_map[last_task];
           PrimExpr barrier_load = BufferLoad(barrier_buffer, {0});
@@ -966,8 +963,8 @@ AnalyzeControlNodeBarriers(ControlNode *ctrl, int &next_barrier_id,
           int barrier_id = next_barrier_id++;
           // Create a single barrier buffer with shape (num_versions,)
           Buffer barrier_buffer = makeBarrierBuffer(
-              1, "tcgen05_barrier_" + std::to_string(barrier_id),
-              num_versions, barrier_buffers, barrier_map);
+              1, "tcgen05_barrier_" + std::to_string(barrier_id), num_versions,
+              barrier_buffers, barrier_map);
           barrier_unit_map[task] = std::make_pair(barrier_buffer, num_versions);
 
           // Rewrite the gemm call's mbar argument (arg[16]) to use
@@ -997,16 +994,14 @@ AnalyzeControlNodeBarriers(ControlNode *ctrl, int &next_barrier_id,
           ICHECK(wg_id != -1) << "TMA loads must have valid warpgroup id";
 
           int barrier_id = next_barrier_id++;
-          Buffer barrier_buffer =
-              makeBarrierBuffer(thread_count[wg_id],
-                                "tma_barrier_" + std::to_string(barrier_id),
-                                num_versions, barrier_buffers, barrier_map);
+          Buffer barrier_buffer = makeBarrierBuffer(
+              thread_count[wg_id], "tma_barrier_" + std::to_string(barrier_id),
+              num_versions, barrier_buffers, barrier_map);
           barrier_unit_map[task] = std::make_pair(barrier_buffer, num_versions);
 
           PrimExpr version_index =
               indexmod(loop_info.CalculateIterationCount(), num_versions);
-          PrimExpr barrier_load =
-              BufferLoad(barrier_buffer, {version_index});
+          PrimExpr barrier_load = BufferLoad(barrier_buffer, {version_index});
           RewriteCopyMbar(child, barrier_load);
           Stmt arrive_stmt = makeBarrierArrive(barrier_load);
           InsertStatementIntoScheduleUnit(task, arrive_stmt, false, wg_id);
@@ -1016,7 +1011,8 @@ AnalyzeControlNodeBarriers(ControlNode *ctrl, int &next_barrier_id,
 
     // Insert barriers for other dependencies
     // First collect shared buffers
-    std::set<std::pair<int, Buffer>, std::greater<std::pair<int, Buffer>>> shared_buffers;
+    std::set<std::pair<int, Buffer>, std::greater<std::pair<int, Buffer>>>
+        shared_buffers;
     for (const auto &region_access : ctrl->GetReadWriteRegions()) {
       auto &buffer = region_access.region->buffer;
       if (IsSharedBuffer(buffer)) {
@@ -1025,7 +1021,8 @@ AnalyzeControlNodeBarriers(ControlNode *ctrl, int &next_barrier_id,
         shared_buffers.emplace(num_versions, buffer);
       }
     }
-    // Process buffers in order of decreasing number of versions to ensure correct barrier size
+    // Process buffers in order of decreasing number of versions to ensure
+    // correct barrier size
     auto is_async_task = [](ScheduleUnit *task) {
       return task->UsesTensorCore() || task->UsesTMACore();
     };
@@ -1053,7 +1050,8 @@ AnalyzeControlNodeBarriers(ControlNode *ctrl, int &next_barrier_id,
                 return;
               int last_stage = last_task->GetStage();
               bool last_async = is_async_task(last_task);
-              if (last_wg_id == wg_id && last_stage == stage && !is_async && !last_async)
+              if (last_wg_id == wg_id && last_stage == stage && !is_async &&
+                  !last_async)
                 return;
               if (barrier_unit_map.find(last_task) == barrier_unit_map.end()) {
                 // Allocate a new barrier buffer
@@ -1062,7 +1060,8 @@ AnalyzeControlNodeBarriers(ControlNode *ctrl, int &next_barrier_id,
                     thread_count[last_wg_id],
                     "barrier_" + std::to_string(barrier_id), num_versions,
                     barrier_buffers, barrier_map);
-                barrier_unit_map[last_task] = std::make_pair(barrier_buffer, num_versions);
+                barrier_unit_map[last_task] =
+                    std::make_pair(barrier_buffer, num_versions);
                 // Create BufferLoad with version-indexed offset
                 PrimExpr version_index =
                     indexmod(loop_info.CalculateIterationCount(), num_versions);
@@ -1070,18 +1069,23 @@ AnalyzeControlNodeBarriers(ControlNode *ctrl, int &next_barrier_id,
                     BufferLoad(barrier_buffer, {version_index});
                 // Insert barrier_arrive at the end of last_task's statements
                 Stmt arrive_stmt = makeBarrierArrive(barrier_load);
-                InsertStatementIntoScheduleUnit(last_task, arrive_stmt, false, last_wg_id);
+                InsertStatementIntoScheduleUnit(last_task, arrive_stmt, false,
+                                                last_wg_id);
               }
-              auto [barrier_buffer, barrier_versions] = barrier_unit_map[last_task];
+              auto [barrier_buffer, barrier_versions] =
+                  barrier_unit_map[last_task];
               PrimExpr iteration = loop_info.CalculateIterationCount();
               if (iter == 1) {
                 // Calculate the real iteration to wait.
-                // "+ barrier_versions * 2" ensures positive iteration for division and modulo, and keeps the parity the same.
+                // "+ barrier_versions * 2" ensures positive iteration for
+                // division and modulo, and keeps the parity the same.
                 iteration += barrier_versions * 2 - num_versions;
               }
               PrimExpr version_index = indexmod(iteration, barrier_versions);
-              PrimExpr barrier_load = BufferLoad(barrier_buffer, {version_index});
-              PrimExpr parity_expr = indexmod(indexdiv(iteration, barrier_versions), 2);
+              PrimExpr barrier_load =
+                  BufferLoad(barrier_buffer, {version_index});
+              PrimExpr parity_expr =
+                  indexmod(indexdiv(iteration, barrier_versions), 2);
               Stmt wait_stmt = makeBarrierWait(barrier_load, parity_expr);
               InsertStatementIntoScheduleUnit(task, wait_stmt, true, wg_id);
             };
