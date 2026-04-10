@@ -261,6 +261,21 @@ CloneIRStructureWithWarpgroupFilter(IRStructure *node, int warpgroup_id) {
   return CloneIRStructureWithWarpgroupFilter(node, warpgroup_id, var_remap);
 }
 
+// For each child of a root SequenceNode, apply
+// CloneIRStructureWithWarpgroupFilter individually.
+std::vector<std::shared_ptr<IRStructure>>
+CloneIRStructureChildrenWithWarpgroupFilter(SequenceNode *root_seq,
+                                            int warpgroup_id,
+                                            Map<Var, PrimExpr> &var_remap) {
+  std::vector<std::shared_ptr<IRStructure>> result;
+  result.reserve(root_seq->children.size());
+  for (const auto &child : root_seq->children) {
+    result.push_back(CloneIRStructureWithWarpgroupFilter(
+        child.get(), warpgroup_id, var_remap));
+  }
+  return result;
+}
+
 std::shared_ptr<IRStructure>
 RemoveUnusedLetDecls(std::shared_ptr<IRStructure> root) {
   if (!root)
@@ -928,11 +943,32 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
       clone_neutral_filter_with_top_level(root, is_pro_top_level_index, -1);
   auto wg_epi_neutral_structure =
       clone_neutral_filter_with_top_level(root, is_epi_top_level_index, -1);
+  // wg_children[wg_id][child_index] = filtered IRStructure (nullptr if absent)
+  std::vector<std::vector<std::shared_ptr<IRStructure>>> wg_children(num_wgs);
   std::vector<std::shared_ptr<IRStructure>> wg_structures(num_wgs);
-  for (size_t i = 0; i < num_wgs; ++i) {
-    wg_structures[i] =
-        RemoveUnusedLetDecls(CloneIRStructureWithWarpgroupFilter(root, i));
+  if (root->IsSequence()) {
+    auto root_seq = static_cast<SequenceNode *>(root);
+    for (size_t i = 0; i < num_wgs; ++i) {
+      Map<Var, PrimExpr> var_remap;
+      wg_children[i] =
+          CloneIRStructureChildrenWithWarpgroupFilter(root_seq, i, var_remap);
+    }
+    for (size_t i = 0; i < num_wgs; ++i) {
+      // Rebuild from wg_children: wrap non-null children into a SequenceNode
+      auto rebuilt_seq = std::make_shared<SequenceNode>();
+      for (const auto &child : wg_children[i]) {
+        if (child)
+          rebuilt_seq->children.push_back(child);
+      }
+      wg_structures[i] = rebuilt_seq->children.empty() ? nullptr : rebuilt_seq;
+    }
+  } else {
+    // Fallback for non-SequenceNode root: clone entire root per warpgroup
+    for (size_t i = 0; i < num_wgs; ++i) {
+      wg_structures[i] = CloneIRStructureWithWarpgroupFilter(root, i);
+    }
   }
+
   std::vector<PrimExpr> wg_conditions(num_wgs);
   wg_conditions[0] = thread_count[0];
   for (size_t i = 1; i < num_wgs; ++i) {
@@ -958,57 +994,7 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
                                      outer_enable_epi)
           : Evaluate(0);
 
-  // --- Segment the wg structures by ControlNode (for-loop) boundaries ---
-  // This produces multiple IfThenElse blocks separated by liveness boundary
-  // markers, so that the merge-shared-memory pass can reuse buffers across
-  // segments whose lifetimes do not overlap.
-
-  // Helper: segment a top-level SequenceNode's children into groups separated
-  // by ControlNode boundaries. Each ControlNode becomes its own segment;
-  // consecutive non-ControlNode children are grouped together.
-  auto SegmentSequenceChildren = [](IRStructure *structure)
-      -> std::vector<std::vector<std::shared_ptr<IRStructure>>> {
-    std::vector<std::vector<std::shared_ptr<IRStructure>>> segments;
-    if (!structure || !structure->IsSequence()) {
-      return segments;
-    }
-    auto seq = static_cast<SequenceNode *>(structure);
-
-    std::vector<std::shared_ptr<IRStructure>> current;
-    for (auto &child : seq->children) {
-      auto unit = static_cast<ScheduleUnit *>(child.get());
-      if (unit->child && unit->child->IsControl()) {
-        if (!current.empty()) {
-          segments.push_back(std::move(current));
-          current = {};
-        }
-        segments.push_back({child});
-      } else {
-        current.push_back(child);
-      }
-    }
-    if (!current.empty()) {
-      segments.push_back(std::move(current));
-    }
-
-    return segments;
-  };
-
-  // Helper: wrap a list of ScheduleUnit children back into a temporary
-  // SequenceNode and convert to Stmt.
-  auto SegmentToStmt =
-      [outer_enable_epi](
-          const std::vector<std::shared_ptr<IRStructure>> &children) -> Stmt {
-    if (children.empty())
-      return Evaluate(0);
-    // Even for a single child we go through the SequenceNode path so that
-    // ScheduleUnit before/after stmts are emitted correctly.
-    auto tmp_seq = std::make_shared<SequenceNode>();
-    tmp_seq->children = children;
-    return ConvertIRStructureToStmt(tmp_seq.get(), outer_enable_epi);
-  };
-
-  // Helper: build a single IfThenElse (with wg1 nesting) from a pair of Stmts.
+  // Helper: build a single IfThenElse (with wg nesting) from per-wg Stmts.
   auto MakeWarpgroupIf =
       [&wg_conditions](const std::vector<Stmt> &wg_stmts) -> Stmt {
     Stmt if_then_else = Evaluate(0);
@@ -1018,208 +1004,131 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
     return if_then_else;
   };
 
-  // Helper: collect LetDecl {Var, PrimExpr} pairs from a segment's children.
-  // Returns them in order of appearance, which is the order they must be
-  // nested.
-  auto CollectLetDeclInfo =
-      [](const std::vector<std::shared_ptr<IRStructure>> &children)
-      -> std::vector<std::pair<Var, PrimExpr>> {
-    std::vector<std::pair<Var, PrimExpr>> result;
-    for (auto &child : children) {
-      auto unit = static_cast<ScheduleUnit *>(child.get());
-      IRStructure *inner = unit->child.get();
-      // Handle ScheduleUnit wrapping a TaskNode
-      if (inner && inner->IsTask()) {
-        auto task = static_cast<TaskNode *>(inner);
-        if (IsLetDeclTask(task)) {
-          const auto *let = task->stmts[0].as<LetStmtNode>();
-          result.push_back({let->var, let->value});
-        }
-      }
-    }
-    return result;
-  };
-
-  // Helper: given a Stmt and accumulated LetDecl pairs from previous segments,
-  // create fresh variables with copy_with_suffix, substitute all references
-  // in the Stmt, and wrap with LetStmt bindings.  Variables that are not
-  // referenced in the body (or in kept variables' value expressions) are
-  // pruned to avoid dead declarations.
-  auto WrapWithRenamedLetDecls =
-      [](Stmt body,
-         const std::vector<std::pair<Var, PrimExpr>> &accumulated_lets)
-      -> Stmt {
-    if (accumulated_lets.empty())
-      return body;
-
-    // Build substitution map: old_var -> new_var
-    Map<Var, PrimExpr> subst_map;
-    // Create fresh vars and accumulate them (in order)
-    std::vector<std::pair<Var, PrimExpr>> new_lets;
-    for (auto &[old_var, old_value] : accumulated_lets) {
-      auto new_var = old_var.copy_with_suffix("");
-      subst_map.Set(old_var, new_var);
-      PrimExpr new_value = Substitute(old_value, subst_map);
-      new_lets.push_back({new_var, new_value});
-    }
-
-    // Substitute all references in the body
-    body = Substitute(body, subst_map);
-
-    // Determine which variables are actually used.  Walk from innermost to
-    // outermost: a variable is "needed" if it appears in the body or in any
-    // already-needed variable's value expression.
-    std::vector<bool> needed(new_lets.size(), false);
-    // Start with variables used directly in the body.
-    for (size_t i = 0; i < new_lets.size(); ++i) {
-      const Var &v = new_lets[i].first;
-      if (UsesVar(body,
-                  [&v](const VarNode *node) { return node == v.get(); })) {
-        needed[i] = true;
-      }
-    }
-    // Propagate: if variable j is needed and its value uses variable i,
-    // then i is also needed.  Iterate until fixpoint.
-    bool changed = true;
-    while (changed) {
-      changed = false;
-      for (size_t j = 0; j < new_lets.size(); ++j) {
-        if (!needed[j])
-          continue;
-        for (size_t i = 0; i < j; ++i) {
-          if (needed[i])
-            continue;
-          const Var &vi = new_lets[i].first;
-          if (UsesVar(new_lets[j].second, [&vi](const VarNode *node) {
-                return node == vi.get();
-              })) {
-            needed[i] = true;
-            changed = true;
-          }
-        }
-      }
-    }
-
-    // Wrap only needed LetStmt bindings (innermost first)
-    for (int i = static_cast<int>(new_lets.size()) - 1; i >= 0; --i) {
-      if (needed[i]) {
-        body = LetStmt(new_lets[i].first, new_lets[i].second, body);
-      }
-    }
-    return body;
-  };
-
-  Stmt if_then_else;
-  std::vector<std::vector<std::vector<std::shared_ptr<IRStructure>>>>
-      wg_segments(num_wgs);
-  bool equal_segment_counts = true;
-  for (size_t i = 0; i < num_wgs; ++i) {
-    wg_segments[i] = SegmentSequenceChildren(wg_structures[i].get());
-    equal_segment_counts &= (wg_segments[i].size() == wg_segments[0].size());
-  }
-
-  // Helper: extract the For loop_var pointer from a Control segment
-  // (a segment with exactly one ScheduleUnit whose child is a ControlNode).
-  auto GetControlLoopVar =
-      [](const std::vector<std::shared_ptr<IRStructure>> &seg)
-      -> const VarNode * {
-    if (seg.size() != 1)
-      return nullptr;
-    auto unit = static_cast<ScheduleUnit *>(seg[0].get());
-    if (!unit->child || !unit->child->IsControl())
-      return nullptr;
-    auto ctrl = static_cast<ControlNode *>(unit->child.get());
-    return ctrl->control->loop_var.get();
-  };
-
-  auto MergeNonControlSegments =
-      [&GetControlLoopVar](
-          std::vector<std::vector<std::shared_ptr<IRStructure>>> &segments) {
-        std::vector<std::vector<std::shared_ptr<IRStructure>>> merged;
-        std::vector<std::shared_ptr<IRStructure>> pending;
-        for (auto &seg : segments) {
-          auto lv = GetControlLoopVar(seg);
-          if (lv) {
-            // Control segment: prepend any pending non-Control children
-            merged.push_back(std::move(pending));
-            merged.push_back(std::move(seg));
-            pending.clear();
-          } else {
-            // Non-Control segment: accumulate for merging
-            pending.insert(pending.end(), std::make_move_iterator(seg.begin()),
-                           std::make_move_iterator(seg.end()));
-          }
-        }
-        // Trailing non-Control segments: append to last merged segment
-        merged.push_back(std::move(pending));
-        segments = std::move(merged);
-      };
-
-  for (auto &segments : wg_segments) {
-    MergeNonControlSegments(segments);
-  }
-
-  // Apply segmented splitting
-  std::vector<Stmt> segmented_stmts;
+  // Check for SIMT copy in wg1 (needed for set_max_nreg decision).
   bool has_simt_copy = false;
-  // Check for SIMT copy in any wg1 segment (needed for set_max_nreg
-  // decision).
-  if (num_wgs == 2) {
+  if (num_wgs == 2 && wg_structures[1]) {
     Stmt full_wg1 =
         ConvertIRStructureToStmt(wg_structures[1].get(), outer_enable_epi);
     has_simt_copy = SimtCopyDetector::Detect(full_wg1);
   }
 
-  // Accumulate LetDecl info from previous segments for variable renaming.
-  std::vector<std::vector<std::pair<Var, PrimExpr>>> wg_accumulated_lets(
-      num_wgs);
+  // --- Per-child construction ---
+  // Walk root SequenceNode's children.  LetDecl children accumulate bindings;
+  // non-LetDecl children produce IfThenElse blocks wrapped with accumulated
+  // LetDecl scopes per warp group.
 
-  for (size_t si = 0; si < wg_segments[0].size(); ++si) {
-    // Insert liveness boundary between segments.
-    segmented_stmts.push_back(AttrStmt(
-        Integer(0), attr::kAutoScheduleSharedMemoryBoundary, 0, Evaluate(0)));
+  Stmt if_then_else;
+  if (root->IsSequence()) {
+    auto root_seq = static_cast<SequenceNode *>(root);
+    size_t num_children = root_seq->children.size();
 
-    // Collect LetDecl info from current segment before converting to Stmt.
-    std::vector<std::vector<std::pair<Var, PrimExpr>>> wg_lets(num_wgs);
-    for (size_t i = 0; i < num_wgs; ++i) {
-      wg_lets[i] = CollectLetDeclInfo(wg_segments[i][si]);
-    }
-    std::vector<Stmt> wg_seg_stmts(num_wgs);
-    for (size_t i = 0; i < num_wgs; ++i) {
-      wg_seg_stmts[i] = SegmentToStmt(wg_segments[i][si]);
-    }
+    // per-wg accumulated LetDecl {var, value} from earlier children
+    std::vector<std::vector<std::pair<Var, PrimExpr>>> wg_accumulated_lets(
+        num_wgs);
 
-    // For segments after the first, wrap with renamed LetDecl bindings
-    // from all previous segments so that variables remain in scope.
-    if (si > 0) {
+    std::vector<Stmt> segmented_stmts;
+    bool first_non_let = true;
+
+    for (size_t ci = 0; ci < num_children; ++ci) {
+      auto unit = static_cast<ScheduleUnit *>(root_seq->children[ci].get());
+      bool is_let_decl = IsLetDeclNode(unit->child.get());
+
+      if (is_let_decl) {
+        // Extract LetDecl {var, value} from each wg's filtered result
+        for (size_t i = 0; i < num_wgs; ++i) {
+          if (wg_children[i][ci]) {
+            // wg_children[i][ci] is a ScheduleUnit wrapping a TaskNode
+            IRStructure *inner = wg_children[i][ci].get();
+            TaskNode *task = nullptr;
+            if (inner->IsScheduleUnit()) {
+              task = static_cast<TaskNode *>(
+                  static_cast<ScheduleUnit *>(inner)->child.get());
+            } else if (inner->IsTask()) {
+              task = static_cast<TaskNode *>(inner);
+            }
+            if (task && !task->stmts.empty()) {
+              const auto *let = task->stmts[0].as<LetStmtNode>();
+              if (let) {
+                wg_accumulated_lets[i].push_back({let->var, let->value});
+              }
+            }
+          }
+        }
+        continue; // LetDecl children don't produce IfThenElse
+      }
+
+      // Build per-wg Stmt for this child, wrapped with accumulated LetDecls
+      std::vector<Stmt> wg_stmts(num_wgs);
+      bool all_empty = true;
       for (size_t i = 0; i < num_wgs; ++i) {
-        wg_seg_stmts[i] =
-            WrapWithRenamedLetDecls(wg_seg_stmts[i], wg_accumulated_lets[i]);
+        if (wg_children[i][ci]) {
+          auto tmp_seq = std::make_shared<SequenceNode>();
+          tmp_seq->children.push_back(wg_children[i][ci]);
+          wg_stmts[i] =
+              ConvertIRStructureToStmt(tmp_seq.get(), outer_enable_epi);
+        } else {
+          wg_stmts[i] = Evaluate(0);
+        }
+        if (!IsEvaluateZero(wg_stmts[i])) {
+          all_empty = false;
+        }
+        // Wrap with accumulated LetDecl bindings (innermost first)
+        for (int j = static_cast<int>(wg_accumulated_lets[i].size()) - 1;
+             j >= 0; --j) {
+          wg_stmts[i] = LetStmt(wg_accumulated_lets[i][j].first,
+                                wg_accumulated_lets[i][j].second, wg_stmts[i]);
+        }
+      }
+
+      // Skip segments where all warpgroups produce empty statements
+      if (all_empty)
+        continue;
+
+      // Insert liveness boundary before each non-empty non-LetDecl child
+      segmented_stmts.push_back(AttrStmt(
+          Integer(0), attr::kAutoScheduleSharedMemoryBoundary, 0, Evaluate(0)));
+
+      // Prepend set_max_nreg only to the first non-LetDecl child
+      if (first_non_let && !has_simt_copy && num_wgs == 2 &&
+          config.enable_set_max_nreg) {
+        for (size_t i = 0; i < num_wgs; ++i) {
+          wg_stmts[i] =
+              SeqStmt({Evaluate(Call(DataType::Handle(), tl::set_max_nreg(),
+                                     {i == 0 ? config.consumer_max_nreg
+                                             : config.producer_max_nreg,
+                                      static_cast<int>(!i)})),
+                       wg_stmts[i]});
+        }
+      }
+      first_non_let = false;
+
+      segmented_stmts.push_back(MakeWarpgroupIf(wg_stmts));
+    }
+    if_then_else = SeqStmt::Flatten(segmented_stmts);
+  } else {
+    // Fallback for non-SequenceNode root: no boundary insertion, simple
+    // partition
+    std::vector<Stmt> wg_stmts(num_wgs);
+    for (size_t i = 0; i < num_wgs; ++i) {
+      if (wg_structures[i]) {
+        wg_stmts[i] =
+            ConvertIRStructureToStmt(wg_structures[i].get(), outer_enable_epi);
+      } else {
+        wg_stmts[i] = Evaluate(0);
       }
     }
-
-    // Accumulate this segment's LetDecls for future segments.
-    for (size_t i = 0; i < num_wgs; ++i) {
-      wg_accumulated_lets[i].insert(wg_accumulated_lets[i].end(),
-                                    wg_lets[i].begin(), wg_lets[i].end());
-    }
-
-    // Prepend set_max_nreg only to the first segment.
-    if (si == 0 && !has_simt_copy && num_wgs == 2 &&
-        config.enable_set_max_nreg) {
+    if (!has_simt_copy && num_wgs == 2 && config.enable_set_max_nreg) {
       for (size_t i = 0; i < num_wgs; ++i) {
-        wg_seg_stmts[i] =
+        wg_stmts[i] =
             SeqStmt({Evaluate(Call(DataType::Handle(), tl::set_max_nreg(),
                                    {i == 0 ? config.consumer_max_nreg
                                            : config.producer_max_nreg,
                                     static_cast<int>(!i)})),
-                     wg_seg_stmts[i]});
+                     wg_stmts[i]});
       }
     }
-
-    segmented_stmts.push_back(MakeWarpgroupIf(wg_seg_stmts));
+    if_then_else = MakeWarpgroupIf(wg_stmts);
   }
-  if_then_else = SeqStmt::Flatten(segmented_stmts);
 
   PrimExpr updated_thread_extent = std::accumulate(
       thread_count.begin() + 1, thread_count.end(), thread_count[0]);
