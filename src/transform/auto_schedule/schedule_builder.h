@@ -349,12 +349,30 @@ public:
       resource_flags.push_back(flags);
     }
 
+    // Helper function to check if a buffer is written before being read
+    auto check_buffer_write_first = [&nodes](const Buffer &buffer) {
+      for (const auto &node : nodes) {
+        for (const auto &region : node->GetReadRegions()) {
+          if (region->buffer.same_as(buffer)) {
+            return false; // read access found before any write
+          }
+        }
+        for (const auto &region : node->GetWriteRegions()) {
+          if (region->buffer.same_as(buffer)) {
+            return true; // write access found before any read
+          }
+        }
+      }
+      return false;
+    };
+
     // Collect all shared buffers
     // The negative number means we can use multi-buffering for this buffer, so
     // we need to create a variable for the number of versions for this buffer
     // in z3 scheduler.
     std::vector<int64_t> buffer_sizes;
     std::map<Buffer, int64_t> buffer_to_num_versions;
+    std::set<Buffer> multi_buffering_buffers;
     int64_t memory_limit = shared_memory_limit_;
     for (const auto &region_access : ctrl->GetReadWriteRegions()) {
       const auto &buffer = region_access.region->buffer;
@@ -364,12 +382,13 @@ public:
       if (buffer_to_num_versions.count(buffer)) {
         continue;
       }
-      if (used_buffers.count(buffer)) {
+      if (used_buffers.count(buffer) || !check_buffer_write_first(buffer)) {
         buffer_to_num_versions[buffer] = 1;
         memory_limit -= GetBufferSize(buffer);
       } else {
         buffer_sizes.push_back(GetBufferSize(buffer));
         buffer_to_num_versions[buffer] = -(int64_t)buffer_sizes.size();
+        multi_buffering_buffers.insert(buffer);
       }
     }
 
@@ -635,6 +654,7 @@ public:
     ctrl->SetII(overall_latency);
     ctrl->SetLatency(overall_latency);
     ctrl->SetIIperIter(ii);
+    ctrl->multi_buffering_buffers = std::move(multi_buffering_buffers);
   }
 
   // Set thread index variable for warpgroup partition

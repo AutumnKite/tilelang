@@ -470,6 +470,9 @@ private:
   int64_t ii_{0};      // Initiation interval in cycles
   bool has_promote_{false};
   int64_t ii_per_iter_{0};
+
+public:
+  std::set<Buffer> multi_buffering_buffers;
 };
 
 // Wrapper node: contains a Wrapper statement with variable, value, and child
