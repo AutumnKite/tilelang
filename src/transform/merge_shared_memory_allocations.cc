@@ -23,6 +23,7 @@
  * memory allocation. This pass merges multiple TIR-level dynamic or static
  * shared memory allocations into one allocation.
  */
+#include <tvm/arith/analyzer.h>
 #include <tvm/ffi/function.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/runtime/logging.h>
@@ -587,93 +588,6 @@ private:
     return StmtMutator::VisitStmt_(op);
   }
 
-  Stmt VisitStmt_(const SeqStmtNode *op) final {
-    // Visit children first (strips boundaries, shared memory allocates, etc.)
-    Stmt visited = StmtExprMutator::VisitStmt_(op);
-    const auto *seq = visited.as<SeqStmtNode>();
-    if (!seq)
-      return visited;
-
-    // Helper: check if stmt is Evaluate(0) (remnant of stripped boundaries)
-    auto is_noop = [](const Stmt &s) -> bool {
-      const auto *e = s.as<EvaluateNode>();
-      return e && is_zero(e->value);
-    };
-
-    // Helper: peel off DeclBuffer layers, returning (buffers, inner stmt)
-    auto unwrap_decl_buffers =
-        [](Stmt s) -> std::pair<std::vector<Buffer>, Stmt> {
-      std::vector<Buffer> bufs;
-      while (const auto *d = s.as<DeclBufferNode>()) {
-        bufs.push_back(d->buffer);
-        s = d->body;
-      }
-      return {bufs, s};
-    };
-
-    // Filter out Evaluate(0) remnants
-    std::vector<Stmt> stmts;
-    for (const auto &s : seq->seq) {
-      if (!is_noop(s)) {
-        stmts.push_back(s);
-      }
-    }
-
-    // Merge consecutive DeclBuffer*(IfThenElse(same_cond, ...)) entries
-    tir::ExprDeepEqual expr_equal;
-    std::vector<Stmt> merged;
-    size_t i = 0;
-    while (i < stmts.size()) {
-      auto [bufs_i, inner_i] = unwrap_decl_buffers(stmts[i]);
-      const auto *ite_i = inner_i.as<IfThenElseNode>();
-      if (!ite_i || !ite_i->else_case.defined()) {
-        merged.push_back(stmts[i]);
-        ++i;
-        continue;
-      }
-
-      // Start a merge group
-      std::vector<Buffer> all_bufs(bufs_i);
-      std::vector<Stmt> then_parts{ite_i->then_case};
-      std::vector<Stmt> else_parts{ite_i->else_case.value()};
-      PrimExpr cond = ite_i->condition;
-
-      size_t j = i + 1;
-      while (j < stmts.size()) {
-        auto [bufs_j, inner_j] = unwrap_decl_buffers(stmts[j]);
-        const auto *ite_j = inner_j.as<IfThenElseNode>();
-        if (!ite_j || !ite_j->else_case.defined())
-          break;
-        if (!expr_equal(cond, ite_j->condition))
-          break;
-        all_bufs.insert(all_bufs.end(), bufs_j.begin(), bufs_j.end());
-        then_parts.push_back(ite_j->then_case);
-        else_parts.push_back(ite_j->else_case.value());
-        ++j;
-      }
-
-      if (j == i + 1) {
-        // No merge possible
-        merged.push_back(stmts[i]);
-        ++i;
-      } else {
-        // Build merged IfThenElse
-        Stmt body = IfThenElse(cond, SeqStmt::Flatten(then_parts),
-                               SeqStmt::Flatten(else_parts));
-        // Wrap with all DeclBuffers (innermost last)
-        for (int k = static_cast<int>(all_bufs.size()) - 1; k >= 0; --k) {
-          body = DeclBuffer(all_bufs[k], body);
-        }
-        merged.push_back(body);
-        i = j;
-      }
-    }
-
-    if (merged.size() == 1)
-      return merged[0];
-    return SeqStmt(merged);
-  }
-
   Stmt VisitStmt_(const AllocateNode *op) final {
     if (IsAppropriateSharedMemory(op->buffer_var)) {
       return StmtExprMutator::VisitStmt(op->body);
@@ -868,66 +782,99 @@ private:
       for (int i = 0, n = static_cast<int>(blocks_.size()); i < n; ++i) {
         size_t aligned = AlignUpSize(blocks_[i].offset, alignment);
         size_t head = aligned - blocks_[i].offset;
-        if (head <= blocks_[i].size && (blocks_[i].size - head) >= need) {
-          size_t waste = blocks_[i].size - head - need;
-          if (waste < best_waste) {
-            best_waste = waste;
-            best = i;
-          }
+        if (head > blocks_[i].size)
+          continue;
+        size_t usable = blocks_[i].size - head;
+        if (usable < need)
+          continue;
+        size_t waste = blocks_[i].size - need;
+        if (waste < best_waste) {
+          best_waste = waste;
+          best = i;
         }
       }
-      if (best < 0) {
+      if (best < 0)
         return std::nullopt;
-      }
-      FreeBlock blk = blocks_[best];
-      size_t aligned = AlignUpSize(blk.offset, alignment);
+      return CarveBlock(best, need, alignment);
+    }
+
+    // Try to allocate from the free block whose end touches arena_top.
+    // The block may be smaller than need; the caller grows the arena to
+    // cover the deficit.  Returns the aligned start offset on success.
+    std::optional<size_t> AllocateFromTail(size_t need, size_t alignment,
+                                           size_t arena_top) {
+      if (blocks_.empty())
+        return std::nullopt;
+      int tail_idx = static_cast<int>(blocks_.size()) - 1;
+      if (blocks_[tail_idx].offset + blocks_[tail_idx].size != arena_top)
+        return std::nullopt;
+
+      size_t aligned = AlignUpSize(blocks_[tail_idx].offset, alignment);
+      if (aligned >= arena_top)
+        return std::nullopt;
+
+      FreeBlock blk = blocks_[tail_idx];
       size_t head = aligned - blk.offset;
-      size_t tail = blk.size - head - need;
-      blocks_.erase(blocks_.begin() + best);
+
+      blocks_.erase(blocks_.begin() + tail_idx);
       if (head) {
-        blocks_.push_back({blk.offset, head});
+        InsertBlock(blk.offset, head);
       }
-      if (tail) {
-        blocks_.push_back({aligned + need, tail});
-      }
-      Normalize();
       return aligned;
     }
 
     void Free(size_t offset, size_t size) {
       if (size == 0)
         return;
-      blocks_.push_back({offset, size});
-      Normalize();
+      InsertBlock(offset, size);
     }
 
   private:
-    void Normalize() {
-      if (blocks_.empty())
-        return;
-      std::sort(blocks_.begin(), blocks_.end(),
-                [](const FreeBlock &a, const FreeBlock &b) {
-                  return a.offset < b.offset;
-                });
-      std::vector<FreeBlock> merged;
-      merged.reserve(blocks_.size());
-      for (const FreeBlock &blk : blocks_) {
-        if (merged.empty()) {
-          merged.push_back(blk);
-          continue;
-        }
-        FreeBlock &last = merged.back();
-        size_t last_end = last.offset + last.size;
-        if (blk.offset <= last_end) {
-          size_t blk_end = blk.offset + blk.size;
-          if (blk_end > last_end) {
-            last.size = blk_end - last.offset;
-          }
-        } else {
-          merged.push_back(blk);
+    // Insert a block at the correct sorted position and merge with adjacent
+    // neighbours so the sorted-and-coalesced invariant is preserved.
+    void InsertBlock(size_t offset, size_t size) {
+      FreeBlock entry{offset, size};
+      auto it = std::lower_bound(
+          blocks_.begin(), blocks_.end(), offset,
+          [](const FreeBlock &b, size_t off) { return b.offset < off; });
+      it = blocks_.insert(it, entry);
+
+      // Merge with the next neighbour.
+      auto next = std::next(it);
+      if (next != blocks_.end() && it->offset + it->size >= next->offset) {
+        size_t merged_end =
+            std::max(it->offset + it->size, next->offset + next->size);
+        it->size = merged_end - it->offset;
+        blocks_.erase(next);
+      }
+      // Merge with the previous neighbour.
+      if (it != blocks_.begin()) {
+        auto prev = std::prev(it);
+        if (prev->offset + prev->size >= it->offset) {
+          size_t merged_end =
+              std::max(prev->offset + prev->size, it->offset + it->size);
+          prev->size = merged_end - prev->offset;
+          blocks_.erase(it);
         }
       }
-      blocks_ = std::move(merged);
+    }
+
+    // Remove blocks_[idx], allocate `need` bytes at the aligned offset
+    // within it, and return any head/tail fragments to the free list.
+    size_t CarveBlock(int idx, size_t need, size_t alignment) {
+      FreeBlock blk = blocks_[idx];
+      blocks_.erase(blocks_.begin() + idx);
+
+      size_t aligned = AlignUpSize(blk.offset, alignment);
+      size_t head = aligned - blk.offset;
+      size_t tail = blk.size - head - need;
+
+      // Insert tail first so indices are not disturbed by head insertion.
+      if (tail)
+        InsertBlock(aligned + need, tail);
+      if (head)
+        InsertBlock(blk.offset, head);
+      return aligned;
     }
 
     std::vector<FreeBlock> blocks_;
@@ -954,8 +901,6 @@ private:
                 if (lhs.size_bytes != rhs.size_bytes) {
                   return lhs.size_bytes > rhs.size_bytes;
                 }
-                // Use name comparison for deterministic ordering instead of
-                // pointer comparison
                 return lhs.var->name_hint < rhs.var->name_hint;
               });
 
@@ -966,7 +911,6 @@ private:
     size_t arena_top = 0;
     std::unordered_map<const VarNode *, size_t> offsets;
 
-    // Expire intervals that end before or at program counter `pc`.
     auto retire = [&](int pc) {
       while (!active.empty() && active.top().end <= pc) {
         const ActiveInterval top = active.top();
@@ -978,13 +922,23 @@ private:
     for (const Interval &interval : intervals) {
       retire(interval.start);
       size_t offset = 0;
-      // Try to recycle previously freed memory first; fall back to bumping the
-      // arena.
+      // 1) Reuse a fully fitting free block (best-fit).
+      // 2) Extend the tail free block that touches arena_top.
+      // 3) Bump-allocate at arena_top (reclaim alignment gap).
       if (auto slot =
               freelist.Allocate(interval.size_bytes, interval.alignment)) {
         offset = slot.value();
+      } else if (auto tail_slot = freelist.AllocateFromTail(
+                     interval.size_bytes, interval.alignment, arena_top)) {
+        offset = tail_slot.value();
+        arena_top = offset + interval.size_bytes;
       } else {
         offset = AlignUpSize(arena_top, interval.alignment);
+        // Reclaim the alignment gap [arena_top, offset) so future small
+        // allocations can reuse it.
+        if (offset > arena_top) {
+          freelist.Free(arena_top, offset - arena_top);
+        }
         arena_top = offset + interval.size_bytes;
       }
       active.push(ActiveInterval{interval.end, offset, interval.size_bytes,
@@ -1562,6 +1516,295 @@ private:
   std::unordered_map<const VarNode *, int> shmem_alignment_map_;
 };
 
+/*!
+ * \brief Post-pass that merges consecutive thread-partitioning IfThenElse
+ * nodes.  Runs after SharedMemoryRewriter so that it operates on the
+ * already-rewritten IR without interfering with the analysis framework.
+ *
+ * For each IfThenElse whose condition partitions threadIdx.x, we extract
+ * cut points from the conditions (pattern-matching thread_var < N,
+ * thread_var >= N, etc.) and track the precise integer interval [lo, hi)
+ * for each leaf branch.  Consecutive IfThenElse nodes whose interval sets
+ * are either identical or mutually non-overlapping are merged.
+ */
+class ThreadPartitionMerger : public StmtMutator {
+public:
+  Stmt VisitStmt_(const AttrStmtNode *op) final {
+    if (op->attr_key == tir::attr::thread_extent) {
+      IterVar iter_var = Downcast<IterVar>(op->node);
+      if (iter_var->thread_tag == "threadIdx.x") {
+        thread_var_ = iter_var->var;
+        if (const auto *imm = op->value.as<IntImmNode>()) {
+          thread_extent_ = imm->value;
+        }
+      }
+    }
+    return StmtMutator::VisitStmt_(op);
+  }
+
+  Stmt VisitStmt_(const SeqStmtNode *op) final {
+    Stmt visited = StmtMutator::VisitStmt_(op);
+    const auto *seq = visited.as<SeqStmtNode>();
+    if (!seq)
+      return visited;
+
+    if (!thread_var_.defined() || thread_extent_ <= 1)
+      return visited;
+
+    auto unwrap_decl_buffers =
+        [](Stmt s) -> std::pair<std::vector<Buffer>, Stmt> {
+      std::vector<Buffer> bufs;
+      while (const auto *d = s.as<DeclBufferNode>()) {
+        bufs.push_back(d->buffer);
+        s = d->body;
+      }
+      return {bufs, s};
+    };
+
+    std::vector<Stmt> stmts(seq->seq.begin(), seq->seq.end());
+
+    struct ThreadInterval {
+      int64_t lower;
+      int64_t upper;
+      bool operator==(const ThreadInterval &o) const {
+        return lower == o.lower && upper == o.upper;
+      }
+    };
+
+    struct CutInfo {
+      int64_t cut;
+      bool then_lower;
+    };
+
+    auto try_extract_cut =
+        [this](const PrimExpr &cond,
+               arith::Analyzer *analyzer) -> std::optional<CutInfo> {
+      if (!thread_var_.defined())
+        return std::nullopt;
+      const VarNode *tv = thread_var_.value().get();
+      auto eval_const =
+          [analyzer](const PrimExpr &e) -> std::optional<int64_t> {
+        auto b = analyzer->const_int_bound(e);
+        return (b->min_value == b->max_value)
+                   ? std::optional<int64_t>(b->min_value)
+                   : std::nullopt;
+      };
+      if (const auto *op = cond.as<LTNode>()) {
+        if (op->a.as<VarNode>() == tv) {
+          if (auto v = eval_const(op->b))
+            return CutInfo{*v, true};
+        }
+        if (op->b.as<VarNode>() == tv) {
+          if (auto v = eval_const(op->a))
+            return CutInfo{*v + 1, false};
+        }
+      }
+      if (const auto *op = cond.as<LENode>()) {
+        if (op->a.as<VarNode>() == tv) {
+          if (auto v = eval_const(op->b))
+            return CutInfo{*v + 1, true};
+        }
+        if (op->b.as<VarNode>() == tv) {
+          if (auto v = eval_const(op->a))
+            return CutInfo{*v, false};
+        }
+      }
+      if (const auto *op = cond.as<GTNode>()) {
+        if (op->a.as<VarNode>() == tv) {
+          if (auto v = eval_const(op->b))
+            return CutInfo{*v + 1, false};
+        }
+        if (op->b.as<VarNode>() == tv) {
+          if (auto v = eval_const(op->a))
+            return CutInfo{*v, true};
+        }
+      }
+      if (const auto *op = cond.as<GENode>()) {
+        if (op->a.as<VarNode>() == tv) {
+          if (auto v = eval_const(op->b))
+            return CutInfo{*v, false};
+        }
+        if (op->b.as<VarNode>() == tv) {
+          if (auto v = eval_const(op->a))
+            return CutInfo{*v + 1, true};
+        }
+      }
+      return std::nullopt;
+    };
+
+    using IntervalBranches = std::vector<std::pair<ThreadInterval, Stmt>>;
+
+    std::function<bool(const Stmt &, arith::Analyzer *, int64_t, int64_t,
+                       IntervalBranches &)>
+        decompose_thread_partition;
+    decompose_thread_partition =
+        [this, &try_extract_cut, &decompose_thread_partition](
+            const Stmt &stmt, arith::Analyzer *analyzer, int64_t lo, int64_t hi,
+            IntervalBranches &out) -> bool {
+      const auto *ite = stmt.as<IfThenElseNode>();
+      if (!ite) {
+        out.push_back({{lo, hi}, stmt});
+        return true;
+      }
+      auto cut_opt = try_extract_cut(ite->condition, analyzer);
+      if (!cut_opt.has_value()) {
+        out.push_back({{lo, hi}, stmt});
+        return true;
+      }
+      int64_t cut = cut_opt->cut;
+      if (cut <= lo || cut >= hi)
+        return false;
+
+      if (cut_opt->then_lower) {
+        if (!decompose_thread_partition(ite->then_case, analyzer, lo, cut, out))
+          return false;
+        if (ite->else_case.defined())
+          return decompose_thread_partition(ite->else_case.value(), analyzer,
+                                            cut, hi, out);
+      } else {
+        if (ite->else_case.defined()) {
+          if (!decompose_thread_partition(ite->else_case.value(), analyzer, lo,
+                                          cut, out))
+            return false;
+        }
+        if (!decompose_thread_partition(ite->then_case, analyzer, cut, hi, out))
+          return false;
+      }
+      return true;
+    };
+
+    auto try_decompose =
+        [this, &decompose_thread_partition](
+            const Stmt &stmt) -> std::optional<IntervalBranches> {
+      if (!thread_var_.defined() || thread_extent_ <= 1)
+        return std::nullopt;
+      const auto *ite = stmt.as<IfThenElseNode>();
+      if (!ite)
+        return std::nullopt;
+
+      arith::Analyzer analyzer;
+      IntervalBranches branches;
+      if (!decompose_thread_partition(stmt, &analyzer, 0, thread_extent_,
+                                      branches))
+        return std::nullopt;
+      if (branches.empty())
+        return std::nullopt;
+      return branches;
+    };
+
+    auto rebuild_from_intervals =
+        [this](const std::vector<ThreadInterval> &intervals,
+               const std::vector<Stmt> &bodies) -> Stmt {
+      ICHECK_EQ(intervals.size(), bodies.size());
+      Stmt result = Evaluate(0);
+      for (int i = static_cast<int>(intervals.size()) - 1; i >= 0; --i) {
+        PrimExpr lower =
+            make_const(thread_var_.value().dtype(), intervals[i].lower);
+        PrimExpr upper =
+            make_const(thread_var_.value().dtype(), intervals[i].upper);
+        PrimExpr cond =
+            (lower <= thread_var_.value()) && (thread_var_.value() < upper);
+        result = IfThenElse(cond, bodies[i], result);
+      }
+      return result;
+    };
+
+    auto intervals_compatible = [](const IntervalBranches &a,
+                                   const IntervalBranches &b) -> bool {
+      for (const auto &[iv_a, _a] : a) {
+        for (const auto &[iv_b, _b] : b) {
+          if (iv_a == iv_b)
+            continue;
+          if (iv_a.upper <= iv_b.lower || iv_b.upper <= iv_a.lower)
+            continue;
+          return false;
+        }
+      }
+      return true;
+    };
+
+    auto merge_interval_branches =
+        [](const IntervalBranches &a,
+           const IntervalBranches &b) -> IntervalBranches {
+      IntervalBranches result = a;
+      for (const auto &[iv_b, body_b] : b) {
+        bool found = false;
+        for (auto &[iv_r, body_r] : result) {
+          if (iv_r == iv_b) {
+            body_r = SeqStmt::Flatten(std::vector<Stmt>{body_r, body_b});
+            found = true;
+            break;
+          }
+        }
+        if (!found) {
+          result.push_back({iv_b, body_b});
+        }
+      }
+      std::sort(result.begin(), result.end(), [](const auto &x, const auto &y) {
+        return x.first.lower < y.first.lower;
+      });
+      return result;
+    };
+
+    // Main merge loop
+    std::vector<Stmt> merged;
+    size_t i = 0;
+    while (i < stmts.size()) {
+      auto [bufs_i, inner_i] = unwrap_decl_buffers(stmts[i]);
+      auto opt_i = try_decompose(inner_i);
+      if (!opt_i.has_value()) {
+        merged.push_back(stmts[i]);
+        ++i;
+        continue;
+      }
+
+      IntervalBranches accumulated = opt_i.value();
+      std::vector<Buffer> all_bufs = bufs_i;
+
+      size_t j = i + 1;
+      while (j < stmts.size()) {
+        auto [bufs_j, inner_j] = unwrap_decl_buffers(stmts[j]);
+        auto opt_j = try_decompose(inner_j);
+        if (!opt_j.has_value())
+          break;
+        if (!intervals_compatible(accumulated, opt_j.value()))
+          break;
+        accumulated = merge_interval_branches(accumulated, opt_j.value());
+        all_bufs.insert(all_bufs.end(), bufs_j.begin(), bufs_j.end());
+        ++j;
+      }
+
+      if (j == i + 1) {
+        merged.push_back(stmts[i]);
+        ++i;
+      } else {
+        std::vector<ThreadInterval> intervals;
+        std::vector<Stmt> bodies;
+        for (const auto &[iv, body] : accumulated) {
+          intervals.push_back(iv);
+          bodies.push_back(body);
+        }
+
+        Stmt body = rebuild_from_intervals(intervals, bodies);
+        for (int k = static_cast<int>(all_bufs.size()) - 1; k >= 0; --k)
+          body = DeclBuffer(all_bufs[k], body);
+        merged.push_back(body);
+        i = j;
+      }
+    }
+
+    if (merged.size() == stmts.size())
+      return visited; // nothing merged
+    if (merged.size() == 1)
+      return merged[0];
+    return SeqStmt(merged);
+  }
+
+private:
+  Optional<Var> thread_var_;
+  int64_t thread_extent_{0};
+};
+
 Stmt MergeSharedMemoryAllocations(Stmt stmt, bool merge_static_smem,
                                   bool enable_aggressive_merge,
                                   int align_bytes = 16, bool verbose = false) {
@@ -1579,6 +1822,9 @@ Stmt MergeSharedMemoryAllocations(Stmt stmt, bool merge_static_smem,
     rewriter.PlanReuse(stmt, false, enable_aggressive_merge);
     stmt = rewriter(std::move(stmt));
   }
+  // Merge consecutive thread-partitioning IfThenElse nodes
+  ThreadPartitionMerger merger;
+  stmt = merger(std::move(stmt));
   return stmt;
 }
 

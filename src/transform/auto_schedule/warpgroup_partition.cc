@@ -965,7 +965,8 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
   } else {
     // Fallback for non-SequenceNode root: clone entire root per warpgroup
     for (size_t i = 0; i < num_wgs; ++i) {
-      wg_structures[i] = CloneIRStructureWithWarpgroupFilter(root, i);
+      wg_structures[i] =
+          RemoveUnusedLetDecls(CloneIRStructureWithWarpgroupFilter(root, i));
     }
   }
 
@@ -1104,6 +1105,8 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
 
       segmented_stmts.push_back(MakeWarpgroupIf(wg_stmts));
     }
+    segmented_stmts.push_back(AttrStmt(
+        Integer(0), attr::kAutoScheduleSharedMemoryBoundary, 0, Evaluate(0)));
     if_then_else = SeqStmt::Flatten(segmented_stmts);
   } else {
     // Fallback for non-SequenceNode root: no boundary insertion, simple
