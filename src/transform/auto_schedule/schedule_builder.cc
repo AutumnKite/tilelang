@@ -792,6 +792,61 @@ void ScheduleUnitBuilder::NaiveScheduleLoop(ControlNode *ctrl) {
 
   ctrl->SetIIperIter(1);
 
+  int n = static_cast<int>(seq_body->children.size());
+  auto IsVarDecl = [](IRStructure *node) -> bool {
+    if (!node || !node->IsTask())
+      return false;
+    auto task = static_cast<TaskNode *>(node);
+    return task->stmts.size() == 1 &&
+           task->stmts[0].as<LetStmtNode>() != nullptr;
+  };
+  auto SolveConflictVar = [&]() -> bool {
+    for (int i = 0; i < n; ++i) {
+      if (!IsVarDecl(seq_body->children[i].get()))
+        continue;
+      for (int j = 0; j < n; ++j) {
+        if (i == j)
+          continue;
+        auto node_i = seq_body->children[i].get();
+        auto node_j = seq_body->children[j].get();
+        if (!HasDependency(node_i, node_j))
+          continue;
+        if (stage_map[node_j] == stage_map[node_i])
+          continue;
+
+        int rem_stage_j = stage_map[node_j];
+        auto node_i_task = static_cast<TaskNode *>(node_i);
+        auto node_i_let_stmt = node_i_task->stmts[0].as<LetStmtNode>();
+
+        auto cloned_let_stmt =
+            LetStmt(node_i_let_stmt->var.copy_with_suffix(""),
+                    node_i_let_stmt->value, Evaluate(0));
+        auto cloned_task = std::make_shared<TaskNode>();
+        cloned_task->stmts.push_back(cloned_let_stmt);
+        stage_map[cloned_task.get()] = rem_stage_j;
+
+        for (int k = j; k < n; ++k) {
+          auto node_k = seq_body->children[k].get();
+          if (rem_stage_j != stage_map[node_k])
+            continue;
+          if (HasDependency(node_i, node_k)) {
+            node_k->SubstituteVar(node_i_let_stmt->var, cloned_let_stmt->var);
+            stage_map[node_k] = rem_stage_j;
+          }
+        }
+
+        seq_body->children.insert(seq_body->children.begin() + j,
+                                  std::move(cloned_task));
+        n += 1;
+        return true;
+      }
+    }
+    return false;
+  };
+  int conflict_count = 0;
+  while (SolveConflictVar() && ++conflict_count < 100)
+    ;
+
   // Estimate overall latency
   int64_t tripcount = 100;
   const ForNode *for_node = ctrl->control.get();
@@ -855,6 +910,17 @@ void ScheduleUnitBuilder::NaiveScheduleRecursive(
     auto ctrl = static_cast<ControlNode *>(node.get());
     if (ctrl->child) {
       if (ctrl->child->IsSequence() || ctrl->child->IsWrapper()) {
+        std::vector<std::shared_ptr<IRStructure>> origin_children;
+        if (ctrl->child->IsSequence()) {
+          auto seq_body = static_cast<SequenceNode *>(ctrl->child.get());
+          GatherTaskNodes(seq_body->children, origin_children);
+        } else {
+          auto wrapper = static_cast<WrapperNode *>(ctrl->child.get());
+          GatherTaskNodes({wrapper->task, wrapper->child}, origin_children);
+        }
+        for (auto &child : origin_children) {
+          NaiveScheduleRecursive(child);
+        }
         NaiveScheduleLoop(ctrl);
       } else {
         NaiveScheduleRecursive(ctrl->child);
