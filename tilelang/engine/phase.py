@@ -39,10 +39,19 @@ def allow_vectorize(pass_ctx: PassContext | None = None) -> bool:
     return not disable_vectorize
 
 
-def allow_autoschedule(pass_ctx: PassContext | None = None) -> bool:
+def allow_autoschedule(pass_ctx: PassContext | None = None, target: Target | None = None) -> bool:
     if pass_ctx is None:
         pass_ctx = tilelang.transform.get_pass_context()
     enable_autoschedule = pass_ctx.config.get("tl.enable_auto_schedule", False)
+    if enable_autoschedule and target is not None:
+        # Auto-schedule only works on CUDA targets; skip on CPU
+        if target.kind.name != "cuda":
+            return False
+    # When TMA lowering is disabled, skip auto-schedule to avoid
+    # rewriting copies to tma_copy that cannot be lowered.
+    disable_tma_lower = pass_ctx.config.get("tl.disable_tma_lower", False)
+    if disable_tma_lower:
+        return False
     return enable_autoschedule
 
 
@@ -180,10 +189,16 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.InjectAssumes()(mod)
     # Simplify the IR expressions
     mod = tilelang.transform.Simplify()(mod)
-    if allow_autoschedule():
+    if allow_autoschedule(target=target):
         # Auto schedule for high-level operations
         mod = tilelang.transform.IfConditionExtract()(mod)
         mod = tilelang.transform.AutoSchedule(False)(mod)
+        import os
+        if os.environ.get("TILELANG_DUMP_AUTO_SCHEDULE"):
+            print("=" * 60)
+            print("IR after AutoSchedule:")
+            print("=" * 60)
+            print(mod)
         mod = tilelang.transform.Simplify()(mod)
     # Set layouts for reducers
     mod = tilelang.transform.LayoutReducer()(mod)

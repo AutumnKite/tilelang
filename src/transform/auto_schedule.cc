@@ -238,20 +238,37 @@ protected:
   }
 
   void VisitStmt_(const IfThenElseNode *op) override {
-    // If statement -> treat as TaskNode for now (could be refined later)
-    auto task_node = std::make_shared<TaskNode>();
-    task_node->stmts.push_back(GetRef<Stmt>(op));
+    // If statement -> IfNode with independently schedulable branches
+    auto if_node = std::make_shared<IfNode>();
+    if_node->condition = op->condition;
 
-    AnalyzeMemoryExpr(op->condition, task_node.get());
-    AnalyzeResourceUsage(Evaluate(op->condition), task_node.get(), true);
+    // Create task for condition expression resource analysis
+    auto cond_task = std::make_shared<TaskNode>();
+    cond_task->stmts.push_back(Evaluate(op->condition));
+    AnalyzeMemoryExpr(op->condition, cond_task.get());
+    AnalyzeResourceUsage(Evaluate(op->condition), cond_task.get(), true);
+    if_node->task = std::move(cond_task);
 
-    // Analyze both branches for resource usage
-    AnalyzeResourceUsage(op->then_case, task_node.get());
-    if (op->else_case) {
-      AnalyzeResourceUsage(op->else_case.value(), task_node.get());
+    // Recursively build then branch
+    VisitStmt(op->then_case);
+    if (root_) {
+      if_node->then_child = std::move(root_);
     }
 
-    root_ = std::move(task_node);
+    // Recursively build else branch (if present)
+    if (op->else_case) {
+      VisitStmt(op->else_case.value());
+      if (root_) {
+        if_node->else_child = std::move(root_);
+      }
+    }
+
+    // Latency = max of both branches
+    int64_t then_latency = if_node->then_child ? if_node->then_child->GetLatency() : 0;
+    int64_t else_latency = if_node->else_child ? if_node->else_child->GetLatency() : 0;
+    if_node->SetLatency(std::max(then_latency, else_latency));
+
+    root_ = std::move(if_node);
   }
 
   void VisitStmt_(const LetStmtNode *op) override {

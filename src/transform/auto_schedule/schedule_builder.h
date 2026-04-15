@@ -125,11 +125,7 @@ public:
     size_t n = nodes.size();
     if (n <= 1) {
       if (n == 1) {
-        // For TaskNode, set start time
-        if (nodes[0]->IsTask()) {
-          auto task = static_cast<TaskNode *>(nodes[0]);
-          task->SetStartTime(0);
-        }
+        nodes[0]->SetStartTime(0);
       }
       return nodes;
     }
@@ -235,11 +231,7 @@ public:
 
       // Apply start times to nodes
       for (size_t i = 0; i < n; ++i) {
-        // Only TaskNode has SetStartTime method
-        if (nodes[i]->IsTask()) {
-          auto task = static_cast<TaskNode *>(nodes[i]);
-          task->SetStartTime(start_times[i]);
-        }
+        nodes[i]->SetStartTime(start_times[i]);
       }
 
       // Create sorted task list based on start_time (and original index as
