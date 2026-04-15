@@ -630,51 +630,10 @@ Stmt ConvertIRStructureToStmt(IRStructure *structure,
       }
       unit_stages[unit->stage - min_stages].push_back(SeqStmt::Flatten(stmts));
     }
-    // Check if any task in this control node contains loop_break
-    // If any task contains loop_break, disable prologue
-    std::function<bool(IRStructure *)> check_contains_loop_break;
-    check_contains_loop_break =
-        [&check_contains_loop_break](IRStructure *structure) -> bool {
-      if (!structure)
-        return false;
-
-      if (structure->IsTask()) {
-        auto task = static_cast<TaskNode *>(structure);
-        return task->ContainsLoopBreak();
-      } else if (structure->IsSequence()) {
-        auto seq = static_cast<SequenceNode *>(structure);
-        for (const auto &child : seq->children) {
-          auto unit = static_cast<ScheduleUnit *>(child.get());
-          if (check_contains_loop_break(unit->child.get())) {
-            return true;
-          }
-        }
-        return false;
-      } else if (structure->IsScheduleUnit()) {
-        auto unit = static_cast<ScheduleUnit *>(structure);
-        return check_contains_loop_break(unit->child.get());
-      } else if (structure->IsControl()) {
-        auto ctrl = static_cast<ControlNode *>(structure);
-        return check_contains_loop_break(ctrl->child.get());
-      } else if (structure->IsWrapper()) {
-        auto wrapper = static_cast<WrapperNode *>(structure);
-        return check_contains_loop_break(wrapper->child.get());
-      } else if (structure->IsIf()) {
-        auto if_node = static_cast<IfNode *>(structure);
-        if (if_node->then_child &&
-            check_contains_loop_break(if_node->then_child.get()))
-          return true;
-        if (if_node->else_child &&
-            check_contains_loop_break(if_node->else_child.get()))
-          return true;
-      }
-      return false;
-    };
-
     // Set enable_pro to true only if:
-    // 1. No task contains loop_break
+    // 1. No node contains loop_break
     // 2. Loop boundaries (min and extent) are constants
-    bool enable_pro = !check_contains_loop_break(ctrl->child.get());
+    bool enable_pro = !(ctrl->child && ctrl->child->ContainsLoopBreak());
 
     // Check if loop boundaries are constants
     bool loop_min_is_const = tir::is_const_int(loop_start);

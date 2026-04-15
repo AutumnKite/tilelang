@@ -126,6 +126,9 @@ public:
 
   virtual bool containWarpgroupId(int id) const = 0;
 
+  // Check if this node (or any descendant) contains a loop_break call
+  virtual bool ContainsLoopBreak() const = 0;
+
   // Start time for scheduling
   void SetStartTime(int64_t start_time) { start_time_ = start_time; }
   int64_t GetStartTime() const { return start_time_; }
@@ -313,7 +316,7 @@ public:
   }
 
   // Check if this task contains loop_break call
-  bool ContainsLoopBreak() const;
+  bool ContainsLoopBreak() const override;
 
 private:
   // Resource usage flags
@@ -477,6 +480,10 @@ public:
     return child && child->containWarpgroupId(id);
   }
 
+  bool ContainsLoopBreak() const override {
+    return false; // Loop does not contain loop break
+  }
+
 private:
   // Latency estimation
   int64_t latency_{0}; // Estimated latency in cycles
@@ -579,6 +586,11 @@ public:
 
   bool containWarpgroupId(int id) const override {
     return child && child->containWarpgroupId(id);
+  }
+
+  bool ContainsLoopBreak() const override {
+    return (task && task->ContainsLoopBreak()) ||
+           (child && child->ContainsLoopBreak());
   }
 
 private:
@@ -751,6 +763,12 @@ public:
            (else_child && else_child->containWarpgroupId(id));
   }
 
+  bool ContainsLoopBreak() const override {
+    return (task && task->ContainsLoopBreak()) ||
+           (then_child && then_child->ContainsLoopBreak()) ||
+           (else_child && else_child->ContainsLoopBreak());
+  }
+
 private:
   int64_t latency_{0};
   int64_t ii_{0};
@@ -860,6 +878,10 @@ public:
     return child && child->containWarpgroupId(id);
   }
 
+  bool ContainsLoopBreak() const override {
+    return child && child->ContainsLoopBreak();
+  }
+
 private:
   // Latency estimation
   int64_t latency_{0}; // Estimated latency in cycles
@@ -917,6 +939,15 @@ public:
   bool containWarpgroupId(int id) const override {
     for (auto &child : children) {
       if (child->containWarpgroupId(id)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  bool ContainsLoopBreak() const override {
+    for (const auto &child : children) {
+      if (child->ContainsLoopBreak()) {
         return true;
       }
     }
