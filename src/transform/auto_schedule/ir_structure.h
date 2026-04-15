@@ -481,8 +481,7 @@ public:
   }
 
   bool ContainsLoopBreak() const override {
-    return (task && task->ContainsLoopBreak()) ||
-           (child && child->ContainsLoopBreak());
+    return false; // Loop does not contain loop break
   }
 
 private:
