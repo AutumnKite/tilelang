@@ -193,12 +193,6 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
         # Auto schedule for high-level operations
         mod = tilelang.transform.IfConditionExtract()(mod)
         mod = tilelang.transform.AutoSchedule(False)(mod)
-        import os
-        if os.environ.get("TILELANG_DUMP_AUTO_SCHEDULE"):
-            print("=" * 60)
-            print("IR after AutoSchedule:")
-            print("=" * 60)
-            print(mod)
         mod = tilelang.transform.Simplify()(mod)
     # Set layouts for reducers
     mod = tilelang.transform.LayoutReducer()(mod)
