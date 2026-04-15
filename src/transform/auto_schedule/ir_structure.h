@@ -602,20 +602,26 @@ public:
   // Resource usage flags (aggregate from both branches)
   bool UsesCUDACore() const override {
     bool result = false;
-    if (then_child) result |= then_child->UsesCUDACore();
-    if (else_child) result |= else_child->UsesCUDACore();
+    if (then_child)
+      result |= then_child->UsesCUDACore();
+    if (else_child)
+      result |= else_child->UsesCUDACore();
     return result;
   }
   bool UsesTMACore() const override {
     bool result = false;
-    if (then_child) result |= then_child->UsesTMACore();
-    if (else_child) result |= else_child->UsesTMACore();
+    if (then_child)
+      result |= then_child->UsesTMACore();
+    if (else_child)
+      result |= else_child->UsesTMACore();
     return result;
   }
   bool UsesTensorCore() const override {
     bool result = false;
-    if (then_child) result |= then_child->UsesTensorCore();
-    if (else_child) result |= else_child->UsesTensorCore();
+    if (then_child)
+      result |= then_child->UsesTensorCore();
+    if (else_child)
+      result |= else_child->UsesTensorCore();
     return result;
   }
 
@@ -697,9 +703,12 @@ public:
 
   void SubstituteVar(const Var &old_var, const Var &new_var) override {
     condition = Substitute(condition, {{old_var, new_var}});
-    if (then_child) then_child->SubstituteVar(old_var, new_var);
-    if (else_child) else_child->SubstituteVar(old_var, new_var);
-    if (task) task->SubstituteVar(old_var, new_var);
+    if (then_child)
+      then_child->SubstituteVar(old_var, new_var);
+    if (else_child)
+      else_child->SubstituteVar(old_var, new_var);
+    if (task)
+      task->SubstituteVar(old_var, new_var);
   }
 
   // Latency = max of both branches
@@ -708,16 +717,22 @@ public:
 
   // Setters (delegate to both branches)
   void SetUsesCUDACore(bool value) override {
-    if (then_child) then_child->SetUsesCUDACore(value);
-    if (else_child) else_child->SetUsesCUDACore(value);
+    if (then_child)
+      then_child->SetUsesCUDACore(value);
+    if (else_child)
+      else_child->SetUsesCUDACore(value);
   }
   void SetUsesTMACore(bool value) override {
-    if (then_child) then_child->SetUsesTMACore(value);
-    if (else_child) else_child->SetUsesTMACore(value);
+    if (then_child)
+      then_child->SetUsesTMACore(value);
+    if (else_child)
+      else_child->SetUsesTMACore(value);
   }
   void SetUsesTensorCore(bool value) override {
-    if (then_child) then_child->SetUsesTensorCore(value);
-    if (else_child) else_child->SetUsesTensorCore(value);
+    if (then_child)
+      then_child->SetUsesTensorCore(value);
+    if (else_child)
+      else_child->SetUsesTensorCore(value);
   }
   void SetReadRegions(const std::vector<BufferRegion> &regions) override {}
   void SetWriteRegions(const std::vector<BufferRegion> &regions) override {}

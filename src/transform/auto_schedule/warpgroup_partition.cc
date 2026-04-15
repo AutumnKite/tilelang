@@ -661,9 +661,11 @@ Stmt ConvertIRStructureToStmt(IRStructure *structure,
         return check_contains_loop_break(wrapper->child.get());
       } else if (structure->IsIf()) {
         auto if_node = static_cast<IfNode *>(structure);
-        if (if_node->then_child && check_contains_loop_break(if_node->then_child.get()))
+        if (if_node->then_child &&
+            check_contains_loop_break(if_node->then_child.get()))
           return true;
-        if (if_node->else_child && check_contains_loop_break(if_node->else_child.get()))
+        if (if_node->else_child &&
+            check_contains_loop_break(if_node->else_child.get()))
           return true;
       }
       return false;
@@ -784,12 +786,12 @@ Stmt ConvertIRStructureToStmt(IRStructure *structure,
     }
   } else if (structure->IsIf()) {
     auto if_node = static_cast<const IfNode *>(structure);
-    Stmt then_stmt = ConvertIRStructureToStmt(if_node->then_child.get(),
-                                               outer_enable_epi);
+    Stmt then_stmt =
+        ConvertIRStructureToStmt(if_node->then_child.get(), outer_enable_epi);
     Optional<Stmt> else_stmt;
     if (if_node->else_child) {
-      else_stmt = ConvertIRStructureToStmt(if_node->else_child.get(),
-                                            outer_enable_epi);
+      else_stmt =
+          ConvertIRStructureToStmt(if_node->else_child.get(), outer_enable_epi);
     }
     return IfThenElse(if_node->condition, then_stmt, else_stmt);
   }

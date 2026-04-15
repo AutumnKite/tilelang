@@ -264,8 +264,10 @@ protected:
     }
 
     // Latency = max of both branches
-    int64_t then_latency = if_node->then_child ? if_node->then_child->GetLatency() : 0;
-    int64_t else_latency = if_node->else_child ? if_node->else_child->GetLatency() : 0;
+    int64_t then_latency =
+        if_node->then_child ? if_node->then_child->GetLatency() : 0;
+    int64_t else_latency =
+        if_node->else_child ? if_node->else_child->GetLatency() : 0;
     if_node->SetLatency(std::max(then_latency, else_latency));
 
     root_ = std::move(if_node);

@@ -43,10 +43,9 @@ def allow_autoschedule(pass_ctx: PassContext | None = None, target: Target | Non
     if pass_ctx is None:
         pass_ctx = tilelang.transform.get_pass_context()
     enable_autoschedule = pass_ctx.config.get("tl.enable_auto_schedule", False)
-    if enable_autoschedule and target is not None:
+    if enable_autoschedule and target is not None and target.kind.name != "cuda":
         # Auto-schedule only works on CUDA targets; skip on CPU
-        if target.kind.name != "cuda":
-            return False
+        return False
     # When TMA lowering is disabled, skip auto-schedule to avoid
     # rewriting copies to tma_copy that cannot be lowered.
     disable_tma_lower = pass_ctx.config.get("tl.disable_tma_lower", False)
