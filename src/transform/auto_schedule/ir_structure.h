@@ -80,6 +80,9 @@ public:
   virtual bool UsesTMACore() const = 0;
   virtual bool UsesTensorCore() const = 0;
 
+  virtual bool HasWGMMA() const = 0;
+  virtual bool HasTCGEN05() const = 0;
+
   // Memory access regions (collected during analysis)
   virtual std::vector<BufferRegion> GetReadRegions() const = 0;
   virtual std::vector<BufferRegion> GetWriteRegions() const = 0;
@@ -246,6 +249,9 @@ public:
     return has_gemm_inst_ && gemm_inst_ == GemmInst::kTCGEN5MMA;
   }
 
+  bool HasWGMMA() const override { return is_WGMMA(); }
+  bool HasTCGEN05() const override { return is_TCGEN05(); }
+
   // Get aggregated shape information for II estimation
   int64_t GetTotalTensorCoreOps() const {
     int64_t total_ops = 0;
@@ -360,6 +366,11 @@ public:
   }
   bool UsesTensorCore() const override {
     return child ? child->UsesTensorCore() : false;
+  }
+
+  bool HasWGMMA() const override { return child ? child->HasWGMMA() : false; }
+  bool HasTCGEN05() const override {
+    return child ? child->HasTCGEN05() : false;
   }
 
   // Memory access regions (aggregate from child & task)
@@ -496,6 +507,11 @@ public:
     return child ? child->UsesTensorCore() : false;
   }
 
+  bool HasWGMMA() const override { return child ? child->HasWGMMA() : false; }
+  bool HasTCGEN05() const override {
+    return child ? child->HasTCGEN05() : false;
+  }
+
   // Memory access regions (aggregate from child)
   std::vector<BufferRegion> GetReadRegions() const override {
     return child ? child->GetReadRegions() : std::vector<BufferRegion>{};
@@ -588,6 +604,11 @@ public:
   }
   bool UsesTensorCore() const override {
     return child ? child->UsesTensorCore() : false;
+  }
+
+  bool HasWGMMA() const override { return child ? child->HasWGMMA() : false; }
+  bool HasTCGEN05() const override {
+    return child ? child->HasTCGEN05() : false;
   }
 
   // Memory access regions (aggregate from child)
@@ -685,6 +706,9 @@ public:
   bool UsesCUDACore() const override;
   bool UsesTMACore() const override;
   bool UsesTensorCore() const override;
+
+  bool HasWGMMA() const override;
+  bool HasTCGEN05() const override;
 
   // Memory access regions (aggregate from all children)
   std::vector<BufferRegion> GetReadRegions() const override;

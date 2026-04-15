@@ -461,6 +461,8 @@ static void RewriteGemmMbar(TaskNode *task, PrimExpr mbar_expr) {
   static const auto gemm_op = Op::Get("tl.tileop.gemm");
   static const auto wgmma_gemm_py_op = Op::Get("tl.tileop.wgmma_gemm_py");
   static const auto wgmma_gemm_op = Op::Get("tl.tileop.wgmma_gemm");
+  static const auto tcgen05_gemm_py_op = Op::Get("tl.tileop.tcgen05_gemm_py");
+  static const auto tcgen05_gemm_op = Op::Get("tl.tileop.tcgen05_gemm");
 
   class GemmMbarRewriter : public StmtExprMutator {
   public:
@@ -472,9 +474,14 @@ static void RewriteGemmMbar(TaskNode *task, PrimExpr mbar_expr) {
       static const auto gemm_op = Op::Get("tl.tileop.gemm");
       static const auto wgmma_gemm_py_op = Op::Get("tl.tileop.wgmma_gemm_py");
       static const auto wgmma_gemm_op = Op::Get("tl.tileop.wgmma_gemm");
+      static const auto tcgen05_gemm_py_op =
+          Op::Get("tl.tileop.tcgen05_gemm_py");
+      static const auto tcgen05_gemm_op = Op::Get("tl.tileop.tcgen05_gemm");
 
       if ((op->op.same_as(gemm_py_op) || op->op.same_as(gemm_op) ||
-           op->op.same_as(wgmma_gemm_py_op) || op->op.same_as(wgmma_gemm_op)) &&
+           op->op.same_as(wgmma_gemm_py_op) || op->op.same_as(wgmma_gemm_op) ||
+           op->op.same_as(tcgen05_gemm_py_op) ||
+           op->op.same_as(tcgen05_gemm_op)) &&
           op->args.size() > 16) {
         Array<PrimExpr> new_args;
         for (size_t i = 0; i < op->args.size(); ++i) {

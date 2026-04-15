@@ -88,6 +88,22 @@ bool SequenceNode::UsesTensorCore() const {
   return false;
 }
 
+bool SequenceNode::HasWGMMA() const {
+  for (const auto &child : children) {
+    if (child && child->HasWGMMA())
+      return true;
+  }
+  return false;
+}
+
+bool SequenceNode::HasTCGEN05() const {
+  for (const auto &child : children) {
+    if (child && child->HasTCGEN05())
+      return true;
+  }
+  return false;
+}
+
 std::vector<BufferRegion> SequenceNode::GetReadRegions() const {
   std::vector<BufferRegion> all_read_regions;
   for (const auto &child : children) {
