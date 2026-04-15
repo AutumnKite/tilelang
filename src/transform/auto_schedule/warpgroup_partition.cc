@@ -540,6 +540,9 @@ Stmt ConvertIRStructureToStmt(IRStructure *structure,
             }
           }
         }
+      } else if (ctrl->child->IsTask()) {
+        auto task = static_cast<TaskNode *>(ctrl->child.get());
+        stmts.push_back(ConvertIRStructureToStmt(task, outer_enable_epi));
       } else {
         LOG(FATAL);
       }

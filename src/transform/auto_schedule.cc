@@ -228,6 +228,15 @@ protected:
     root_ = std::move(task_node);
   }
 
+  void VisitStmt_(const BufferStoreNode *op) override {
+    auto task_node = std::make_shared<TaskNode>();
+    task_node->stmts.push_back(GetRef<Stmt>(op));
+
+    AnalyzeResourceUsage(GetRef<Stmt>(op), task_node.get());
+
+    root_ = std::move(task_node);
+  }
+
   void VisitStmt_(const IfThenElseNode *op) override {
     // If statement -> treat as TaskNode for now (could be refined later)
     auto task_node = std::make_shared<TaskNode>();
