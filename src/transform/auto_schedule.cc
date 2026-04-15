@@ -642,8 +642,7 @@ tvm::transform::Pass AutoSchedule(const bool enable_epi) {
 
     // Check if aggressive auto-schedule is enabled
     bool aggressive =
-        ctx->GetConfig<Bool>(kEnableAggressiveAutoSchedule, Bool(false))
-            .value();
+        ctx->GetConfig<Bool>(kEnableAggressiveAutoSchedule, Bool(true)).value();
 
     // Build ScheduleUnits from IRStructure
     ScheduleUnitBuilder unit_builder;

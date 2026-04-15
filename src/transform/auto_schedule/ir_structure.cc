@@ -501,10 +501,6 @@ void CollectAllTaskNodesWithContext(IRStructure *node,
   } else if (node->IsIf()) {
     auto if_node = static_cast<const IfNode *>(node);
     // Recurse into both branches
-    if (if_node->task) {
-      CollectAllTaskNodesWithContext(if_node->task.get(), all_tasks,
-                                     current_control_node);
-    }
     CollectAllTaskNodesWithContext(if_node->then_child.get(), all_tasks,
                                    current_control_node);
     if (if_node->else_child) {
