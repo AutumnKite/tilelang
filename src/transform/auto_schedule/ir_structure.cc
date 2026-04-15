@@ -364,6 +364,24 @@ std::shared_ptr<IRStructure> ScheduleUnit::Clone() const {
   return new_unit;
 }
 
+std::shared_ptr<IRStructure> IfNode::Clone() const {
+  auto new_if = std::make_shared<IfNode>();
+  new_if->condition = condition;
+  if (then_child) {
+    new_if->then_child = then_child->Clone();
+  }
+  if (else_child) {
+    new_if->else_child = else_child->Clone();
+  }
+  if (task) {
+    new_if->task = std::static_pointer_cast<TaskNode>(task->Clone());
+  }
+  new_if->SetLatency(GetLatency());
+  new_if->SetII(GetII());
+  new_if->SetStartTime(GetStartTime());
+  return new_if;
+}
+
 void ControlNode::CollectRegions(
     std::vector<RegionAccessInfo> &result,
     std::set<std::pair<Buffer, std::pair<int, int>>> &visited) const {
@@ -395,6 +413,20 @@ void SequenceNode::CollectRegions(
     if (child) {
       child->CollectRegions(result, visited);
     }
+  }
+}
+
+void IfNode::CollectRegions(
+    std::vector<RegionAccessInfo> &result,
+    std::set<std::pair<Buffer, std::pair<int, int>>> &visited) const {
+  if (task) {
+    task->CollectRegions(result, visited);
+  }
+  if (then_child) {
+    then_child->CollectRegions(result, visited);
+  }
+  if (else_child) {
+    else_child->CollectRegions(result, visited);
   }
 }
 
@@ -466,6 +498,19 @@ void CollectAllTaskNodesWithContext(IRStructure *node,
     // Promote nodes don't change control context, just recurse into child
     CollectAllTaskNodesWithContext(promote->child.get(), all_tasks,
                                    current_control_node);
+  } else if (node->IsIf()) {
+    auto if_node = static_cast<const IfNode *>(node);
+    // Recurse into both branches
+    if (if_node->task) {
+      CollectAllTaskNodesWithContext(if_node->task.get(), all_tasks,
+                                     current_control_node);
+    }
+    CollectAllTaskNodesWithContext(if_node->then_child.get(), all_tasks,
+                                   current_control_node);
+    if (if_node->else_child) {
+      CollectAllTaskNodesWithContext(if_node->else_child.get(), all_tasks,
+                                     current_control_node);
+    }
   } else {
     LOG(FATAL);
   }

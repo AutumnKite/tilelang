@@ -449,6 +449,12 @@ static void RewriteTaskNodeBuffers(
   } else if (node->IsScheduleUnit()) {
     auto unit = static_cast<ScheduleUnit *>(node);
     RewriteTaskNodeBuffers(unit->child.get(), multi_buffer, iteration);
+  } else if (node->IsIf()) {
+    auto if_node = static_cast<IfNode *>(node);
+    if (if_node->then_child)
+      RewriteTaskNodeBuffers(if_node->then_child.get(), multi_buffer, iteration);
+    if (if_node->else_child)
+      RewriteTaskNodeBuffers(if_node->else_child.get(), multi_buffer, iteration);
   }
 }
 
@@ -571,6 +577,20 @@ AnalyzeAndInsertBarriers(IRStructure *node, int &next_barrier_id,
     AnalyzeAndInsertBarriers(
         wrapper->child.get(), next_barrier_id, barrier_buffers, barrier_map,
         thread_count, loop_info, buffer_infos, neutral_sync_shared_barrier);
+  } else if (node->IsIf()) {
+    auto if_node = static_cast<IfNode *>(node);
+    if (if_node->then_child) {
+      AnalyzeAndInsertBarriers(
+          if_node->then_child.get(), next_barrier_id, barrier_buffers,
+          barrier_map, thread_count, loop_info, buffer_infos,
+          neutral_sync_shared_barrier);
+    }
+    if (if_node->else_child) {
+      AnalyzeAndInsertBarriers(
+          if_node->else_child.get(), next_barrier_id, barrier_buffers,
+          barrier_map, thread_count, loop_info, buffer_infos,
+          neutral_sync_shared_barrier);
+    }
   } else if (node->IsTask()) {
     // For TaskNode, nothing to do at this level
   } else {
@@ -591,8 +611,8 @@ AnalyzeSequenceNodeBarriers(SequenceNode *seq, int &next_barrier_id,
 
   for (auto &promote_child : seq->children) {
     auto task = static_cast<ScheduleUnit *>(promote_child.get());
-    if (task->child->IsSequence() || task->child->IsControl()) {
-      // If child is SequenceNode or ControlNode, recursively analyze it
+    if (task->child->IsSequence() || task->child->IsControl() || task->child->IsIf()) {
+      // If child is SequenceNode, ControlNode, or IfNode, recursively analyze it
       AnalyzeAndInsertBarriers(
           task->child.get(), next_barrier_id, barrier_buffers, barrier_map,
           thread_count, loop_info, buffer_infos, neutral_sync_shared_barrier);
@@ -836,8 +856,8 @@ AnalyzeControlNodeBarriers(ControlNode *ctrl, int &next_barrier_id,
     std::vector<ScheduleUnit *> ordered_tasks;
     for (auto &child : seq->children) {
       auto task = static_cast<ScheduleUnit *>(child.get());
-      if (task->child->IsSequence() || task->child->IsControl()) {
-        // If child is SequenceNode or ControlNode, recursively analyze it
+      if (task->child->IsSequence() || task->child->IsControl() || task->child->IsIf()) {
+        // If child is SequenceNode, ControlNode, or IfNode, recursively analyze it
         AnalyzeAndInsertBarriers(
             task->child.get(), next_barrier_id, barrier_buffers, barrier_map,
             thread_count, loop_info, buffer_infos, neutral_sync_shared_barrier);

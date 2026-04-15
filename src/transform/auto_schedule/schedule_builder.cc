@@ -89,6 +89,9 @@ void GatherTaskNodes(const std::vector<std::shared_ptr<IRStructure>> &nodes,
         GatherTaskNodesSingle(wrapper->child, task_nodes);
     } else if (node->IsControl()) {
       task_nodes.emplace_back(node);
+    } else if (node->IsIf()) {
+      // IfNode is atomic — add as whole unit, don't decompose
+      task_nodes.emplace_back(node);
     } else {
       LOG(FATAL) << "Unknown node type in GatherTaskNodes";
     }
@@ -677,6 +680,16 @@ void ScheduleUnitBuilder::ScheduleRecursive(
     seq_node->children = ChildrenScheduleHelper(origin_children);
     node = seq_node;
     return;
+  } else if (node->IsIf()) {
+    // IfNode: recursively schedule both branches internally
+    auto if_node = static_cast<IfNode *>(node.get());
+    if (if_node->then_child) {
+      ScheduleRecursive(if_node->then_child, used_buffers);
+    }
+    if (if_node->else_child) {
+      ScheduleRecursive(if_node->else_child, used_buffers);
+    }
+    return;
   }
 
   LOG(FATAL) << "[ScheduleRecursive] Unknown IRStructure type" << node.get();
@@ -937,6 +950,15 @@ void ScheduleUnitBuilder::NaiveScheduleRecursive(
     WrapInScheduleUnits(origin_children);
     seq_node->children = origin_children;
     node = seq_node;
+  } else if (node->IsIf()) {
+    // IfNode: recursively schedule both branches internally
+    auto if_node = static_cast<IfNode *>(node.get());
+    if (if_node->then_child) {
+      NaiveScheduleRecursive(if_node->then_child);
+    }
+    if (if_node->else_child) {
+      NaiveScheduleRecursive(if_node->else_child);
+    }
   } else {
     LOG(FATAL) << "[NaiveScheduleRecursive] Unknown IRStructure type";
   }

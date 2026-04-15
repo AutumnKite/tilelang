@@ -386,12 +386,18 @@ private:
           if (access_type == 2 || access_type == 3) { // write or read/write
             Update(&write_buffers_, &write_regions_, buffer, relaxed_region);
           }
+
+          for (const auto &index : buffer_load->indices) {
+            VisitExpr(index);
+          }
+          for (size_t i = 2; i < op->args.size(); ++i) {
+            VisitExpr(op->args[i]);
+          }
         } else {
           LOG(FATAL)
               << "First argument of tl.tileop.region should be a BufferLoad";
         }
       }
-      StmtExprVisitor::VisitExpr_(op);
       return;
     }
 
@@ -409,7 +415,6 @@ private:
         // Process second argument as write region
         ProcessBufferRegion(op->args[1], false); // is_read = false
       }
-      StmtExprVisitor::VisitExpr_(op);
       return;
     }
 

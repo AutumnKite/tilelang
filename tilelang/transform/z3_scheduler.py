@@ -8,7 +8,11 @@ import tvm_ffi
 import os
 import json
 import time
+import threading
 from pathlib import Path
+
+# Global lock to serialize Z3 calls — Z3 is not thread-safe
+_z3_lock = threading.Lock()
 
 # Try to import z3, but handle missing installation gracefully
 try:
@@ -206,8 +210,9 @@ def z3_schedule_ffi(latencies, iis, resource_flags, data_deps, resource_deps):
             if hasattr(resource_deps[i], "__len__") and len(resource_deps[i]) == 2:
                 resource_deps_list.append((int(resource_deps[i][0]), int(resource_deps[i][1])))
 
-    # Call the actual scheduler
-    start_times, _ = z3_schedule_python(latencies_list, iis_list, resource_flags_list, data_deps_list, resource_deps_list)
+    # Call the actual scheduler (Z3 is not thread-safe, serialize access)
+    with _z3_lock:
+        start_times, _ = z3_schedule_python(latencies_list, iis_list, resource_flags_list, data_deps_list, resource_deps_list)
 
     # Return only start_times, C++ side will sort by start_time
     return start_times
@@ -664,10 +669,11 @@ def z3_schedule_loop_ffi(num_stages, latencies, iis, resource_flags, data_deps, 
             if hasattr(resource_deps[i], "__len__") and len(resource_deps[i]) == 2:
                 resource_deps_list.append((int(resource_deps[i][0]), int(resource_deps[i][1])))
 
-    # Call the actual scheduler
-    start_times, stages, best_ii = z3_schedule_loop_python(
-        num_stages, latencies_list, iis_list, resource_flags_list, data_deps_list, resource_deps_list, buffer_sizes_list, memory_limit
-    )
+    # Call the actual scheduler (Z3 is not thread-safe, serialize access)
+    with _z3_lock:
+        start_times, stages, best_ii = z3_schedule_loop_python(
+            num_stages, latencies_list, iis_list, resource_flags_list, data_deps_list, resource_deps_list, buffer_sizes_list, memory_limit
+        )
 
     # Return start_times and promotes as separate arrays for easier FFI handling
     # C++ side expects a tuple of (start_times_array, promotes_array)

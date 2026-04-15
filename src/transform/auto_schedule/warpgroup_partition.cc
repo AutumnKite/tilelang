@@ -112,6 +112,12 @@ bool ContainsLetDecl(const IRStructure *node) {
   } else if (node->IsScheduleUnit()) {
     auto unit = static_cast<const ScheduleUnit *>(node);
     return ContainsLetDecl(unit->child.get());
+  } else if (node->IsIf()) {
+    auto if_node = static_cast<const IfNode *>(node);
+    if (ContainsLetDecl(if_node->then_child.get()))
+      return true;
+    if (if_node->else_child && ContainsLetDecl(if_node->else_child.get()))
+      return true;
   }
   return false;
 }
@@ -246,6 +252,34 @@ CloneIRStructureWithWarpgroupFilter(IRStructure *node, int warpgroup_id,
       }
     }
     return new_unit;
+  } else if (node->IsIf()) {
+    if (!node->containWarpgroupId(warpgroup_id) && !ContainsLetDecl(node))
+      return nullptr;
+    auto if_node = static_cast<IfNode *>(node);
+    auto new_if = std::make_shared<IfNode>();
+    new_if->condition = var_remap.empty()
+                            ? if_node->condition
+                            : Substitute(if_node->condition, var_remap);
+    if (if_node->task) {
+      auto cloned_task =
+          std::static_pointer_cast<TaskNode>(if_node->task->Clone());
+      if (!var_remap.empty()) {
+        for (size_t i = 0; i < cloned_task->stmts.size(); ++i) {
+          cloned_task->stmts[i] = Substitute(cloned_task->stmts[i], var_remap);
+        }
+      }
+      new_if->task = std::move(cloned_task);
+    }
+    new_if->then_child = CloneIRStructureWithWarpgroupFilter(
+        if_node->then_child.get(), warpgroup_id, var_remap);
+    if (if_node->else_child) {
+      new_if->else_child = CloneIRStructureWithWarpgroupFilter(
+          if_node->else_child.get(), warpgroup_id, var_remap);
+    }
+    // Return nullptr if both branches are empty
+    if (!new_if->then_child && !new_if->else_child)
+      return nullptr;
+    return new_if;
   }
   LOG(FATAL);
   return nullptr;
@@ -346,6 +380,18 @@ RemoveUnusedLetDecls(std::shared_ptr<IRStructure> root) {
               collector(s);
           }
           referenced_vars.insert(collector.vars.begin(), collector.vars.end());
+        } else if (node->IsIf()) {
+          auto if_node = static_cast<const IfNode *>(node);
+          collect(if_node->task.get());
+          collect(if_node->then_child.get());
+          if (if_node->else_child) {
+            collect(if_node->else_child.get());
+          }
+          // Collect variable references from the condition
+          VarRefCollector cond_collector;
+          cond_collector(if_node->condition);
+          referenced_vars.insert(cond_collector.vars.begin(),
+                                 cond_collector.vars.end());
         }
       };
   collect(root.get());
@@ -424,6 +470,16 @@ RemoveUnusedLetDecls(std::shared_ptr<IRStructure> root) {
       if (!new_unit->child)
         return nullptr;
       return new_unit;
+    } else if (node->IsIf()) {
+      auto if_node = static_cast<const IfNode *>(node.get());
+      auto new_if = std::make_shared<IfNode>();
+      new_if->condition = if_node->condition;
+      new_if->task = if_node->task;
+      new_if->then_child = filter_tree(if_node->then_child);
+      if (if_node->else_child) {
+        new_if->else_child = filter_tree(if_node->else_child);
+      }
+      return new_if;
     }
     return node;
   };
@@ -603,6 +659,12 @@ Stmt ConvertIRStructureToStmt(IRStructure *structure,
       } else if (structure->IsWrapper()) {
         auto wrapper = static_cast<WrapperNode *>(structure);
         return check_contains_loop_break(wrapper->child.get());
+      } else if (structure->IsIf()) {
+        auto if_node = static_cast<IfNode *>(structure);
+        if (if_node->then_child && check_contains_loop_break(if_node->then_child.get()))
+          return true;
+        if (if_node->else_child && check_contains_loop_break(if_node->else_child.get()))
+          return true;
       }
       return false;
     };
@@ -720,6 +782,16 @@ Stmt ConvertIRStructureToStmt(IRStructure *structure,
     } else {
       LOG(FATAL);
     }
+  } else if (structure->IsIf()) {
+    auto if_node = static_cast<const IfNode *>(structure);
+    Stmt then_stmt = ConvertIRStructureToStmt(if_node->then_child.get(),
+                                               outer_enable_epi);
+    Optional<Stmt> else_stmt;
+    if (if_node->else_child) {
+      else_stmt = ConvertIRStructureToStmt(if_node->else_child.get(),
+                                            outer_enable_epi);
+    }
+    return IfThenElse(if_node->condition, then_stmt, else_stmt);
   }
 
   LOG(FATAL)
@@ -800,6 +872,8 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
       return nullptr;
     } else if (node->IsControl()) {
       return nullptr;
+    } else if (node->IsIf()) {
+      return nullptr;
     }
     LOG(FATAL);
     return nullptr;
@@ -867,6 +941,8 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
       }
       return nullptr;
     } else if (node->IsControl()) {
+      return nullptr;
+    } else if (node->IsIf()) {
       return nullptr;
     }
     LOG(FATAL);
