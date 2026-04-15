@@ -461,7 +461,7 @@ public:
   std::shared_ptr<IRStructure> Clone() const override;
 
   bool containWarpgroupId(int id) const override {
-    return child->containWarpgroupId(id);
+    return child && child->containWarpgroupId(id);
   }
 
 private:
@@ -560,7 +560,7 @@ public:
   std::shared_ptr<IRStructure> Clone() const override;
 
   bool containWarpgroupId(int id) const override {
-    return child->containWarpgroupId(id);
+    return child && child->containWarpgroupId(id);
   }
 
 private:
@@ -665,7 +665,7 @@ public:
   std::shared_ptr<IRStructure> Clone() const override;
 
   bool containWarpgroupId(int id) const override {
-    return child->containWarpgroupId(id);
+    return child && child->containWarpgroupId(id);
   }
 
 private:

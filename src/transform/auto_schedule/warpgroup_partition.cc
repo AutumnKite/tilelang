@@ -176,21 +176,18 @@ CloneIRStructureWithWarpgroupFilter(IRStructure *node, int warpgroup_id,
       return nullptr;
     auto ctrl = static_cast<ControlNode *>(node);
     auto new_ctrl = std::make_shared<ControlNode>();
-    // Apply var_remap to the For statement's min/extent/step so that renamed
-    // LetDecl variables are correctly referenced in the loop bounds.
-    if (!var_remap.empty()) {
-      For new_for = ctrl->control;
-      new_for.CopyOnWrite()->min = Substitute(ctrl->control->min, var_remap);
-      new_for.CopyOnWrite()->extent =
-          Substitute(ctrl->control->extent, var_remap);
-      if (ctrl->control->step.has_value()) {
-        new_for.CopyOnWrite()->step =
-            Substitute(ctrl->control->step.value(), var_remap);
-      }
-      new_ctrl->control = new_for;
-    } else {
-      new_ctrl->control = ctrl->control;
+    For new_for = ctrl->control;
+    auto new_loop_var = ctrl->control->loop_var.copy_with_suffix("");
+    new_for.CopyOnWrite()->loop_var = new_loop_var;
+    var_remap.Set(ctrl->control->loop_var, new_loop_var);
+    new_for.CopyOnWrite()->min = Substitute(ctrl->control->min, var_remap);
+    new_for.CopyOnWrite()->extent =
+        Substitute(ctrl->control->extent, var_remap);
+    if (ctrl->control->step.has_value()) {
+      new_for.CopyOnWrite()->step =
+          Substitute(ctrl->control->step.value(), var_remap);
     }
+    new_ctrl->control = new_for;
     // Clone the task and apply var_remap so each warpgroup gets its own copy
     // with correctly renamed LetDecl variables.
     if (ctrl->task) {
@@ -543,6 +540,9 @@ Stmt ConvertIRStructureToStmt(IRStructure *structure,
             }
           }
         }
+      } else if (ctrl->child->IsTask()) {
+        auto task = static_cast<TaskNode *>(ctrl->child.get());
+        stmts.push_back(ConvertIRStructureToStmt(task, outer_enable_epi));
       } else {
         LOG(FATAL);
       }

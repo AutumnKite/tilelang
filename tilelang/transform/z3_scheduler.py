@@ -259,9 +259,7 @@ def z3_schedule_loop_python(
 
     # For small number of tasks, return trivial schedule
     if n <= 1:
-        if n == 1:
-            return [0], [0]
-        return [], []
+        raise RuntimeError("Z3 loop scheduling failed: n too small")
 
     if verbose:
         print(f"[Python Z3 Loop] Starting scheduling for {n} tasks")

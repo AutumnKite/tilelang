@@ -391,6 +391,7 @@ private:
               << "First argument of tl.tileop.region should be a BufferLoad";
         }
       }
+      StmtExprVisitor::VisitExpr_(op);
       return;
     }
 
@@ -408,6 +409,7 @@ private:
         // Process second argument as write region
         ProcessBufferRegion(op->args[1], false); // is_read = false
       }
+      StmtExprVisitor::VisitExpr_(op);
       return;
     }
 
