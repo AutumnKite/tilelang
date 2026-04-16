@@ -381,12 +381,14 @@ AssignWarpgroupIdsGlobal(IRStructure *root, const WarpSpecializeConfig &config,
   CollectPrefixTasks(root, prefix_tasks);
   for (auto *task : prefix_tasks) {
     task->SetSchedulePhase(SchedulePhase::kPrologue);
+    task->SetWarpgroupId(0);
   }
 
   std::unordered_set<TaskNode *> suffix_tasks;
   CollectSuffixTasks(root, all_tasks, uf, suffix_tasks);
   for (auto *task : suffix_tasks) {
     task->SetSchedulePhase(SchedulePhase::kEpilogue);
+    task->SetWarpgroupId(0);
   }
 
   std::unordered_map<int, std::vector<int>> components;
@@ -725,8 +727,8 @@ NaiveAssignWarpgroupIds(IRStructure *root, const WarpSpecializeConfig &config,
   std::unordered_set<TaskNode *> prefix_tasks;
   CollectPrefixTasks(root, prefix_tasks);
   for (auto *task : prefix_tasks) {
-    task->SetWarpgroupId(-1);
     task->SetSchedulePhase(SchedulePhase::kPrologue);
+    task->SetWarpgroupId(0);
   }
 
   int n = all_tasks.size();
@@ -741,8 +743,8 @@ NaiveAssignWarpgroupIds(IRStructure *root, const WarpSpecializeConfig &config,
   std::unordered_set<TaskNode *> suffix_tasks;
   CollectSuffixTasks(root, all_tasks, uf, suffix_tasks);
   for (auto *task : suffix_tasks) {
-    task->SetWarpgroupId(-1);
     task->SetSchedulePhase(SchedulePhase::kEpilogue);
+    task->SetWarpgroupId(0);
   }
 
   // no double_thread in naive mode

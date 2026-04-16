@@ -427,9 +427,6 @@ private:
               }
             }
           }
-          LOG(INFO) << "ResourceAnalyzer: Detected copy-like operation: " << op_name
-                    << ", found_tma=" << found_tma
-                    << ", found_tma_load=" << found_tma_load;
         } else if (op->op.same_as(gemm_py_op) || op->op.same_as(gemm_op) ||
                    op->op.same_as(wgmma_gemm_py_op) ||
                    op->op.same_as(wgmma_gemm_op) ||
