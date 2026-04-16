@@ -111,16 +111,10 @@ bool SameBuffer(const BufferRegion &a, const BufferRegion &b) {
 bool SameVar(const Var &a, const Var &b) { return a.same_as(b); }
 
 bool HasDependency(const IRStructure *a, const IRStructure *b) {
-  if (a->IsTask()) {
-    const TaskNode *task_a = static_cast<const TaskNode *>(a);
-    if (task_a->ContainsLoopBreak())
-      return true;
-  }
-  if (b->IsTask()) {
-    const TaskNode *task_b = static_cast<const TaskNode *>(b);
-    if (task_b->ContainsLoopBreak())
-      return true;
-  }
+  if (a->ContainsLoopBreak())
+    return true;
+  if (b->ContainsLoopBreak())
+    return true;
   for (const auto &write_region_a : a->GetWriteRegions()) {
     for (const auto &read_region_b : b->GetReadRegions()) {
       if (SameBuffer(write_region_a, read_region_b))
@@ -147,16 +141,10 @@ bool HasDependency(const IRStructure *a, const IRStructure *b) {
 }
 
 bool HasRegisterDependency(const IRStructure *a, const IRStructure *b) {
-  if (a->IsTask()) {
-    const TaskNode *task_a = static_cast<const TaskNode *>(a);
-    if (task_a->ContainsLoopBreak())
-      return true;
-  }
-  if (b->IsTask()) {
-    const TaskNode *task_b = static_cast<const TaskNode *>(b);
-    if (task_b->ContainsLoopBreak())
-      return true;
-  }
+  if (a->ContainsLoopBreak())
+    return true;
+  if (b->ContainsLoopBreak())
+    return true;
   for (const auto &write_region_a : a->GetWriteRegions()) {
     if (IsSharedBuffer(write_region_a.get()->buffer))
       continue;
