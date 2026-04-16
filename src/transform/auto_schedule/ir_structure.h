@@ -214,7 +214,10 @@ public:
   int GetWarpgroupId() const override { return warpgroup_id_; }
 
   // Scheduling phase (prologue / body / epilogue)
-  void SetSchedulePhase(SchedulePhase phase) { schedule_phase_ = phase; }
+  void SetSchedulePhase(SchedulePhase phase) {
+    schedule_phase_ = phase;
+    warpgroup_id_ = 0;
+  }
   SchedulePhase GetSchedulePhase() const override { return schedule_phase_; }
   bool IsNeutralPhase() const override {
     return schedule_phase_ != SchedulePhase::kBody;
@@ -1384,7 +1387,7 @@ inline void PrintIRStructure(const IRStructure *node, int indent = 0) {
     }
     if (promote->child) {
       LOG(INFO) << indent_str << "  Promote body:";
-      PrintAllStmts(promote->child.get(), indent + 2);
+      PrintIRStructure(promote->child.get(), indent + 2);
     }
   } else if (node->IsIf()) {
     const IfNode *if_node = static_cast<const IfNode *>(node);

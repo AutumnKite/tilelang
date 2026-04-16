@@ -268,6 +268,10 @@ void CollectSuffixTasks(IRStructure *root,
   std::unordered_set<TaskNode *> candidate_set;
   for (int i = static_cast<int>(items.size()) - 1; i >= 0; --i) {
     auto *item = items[i];
+    if (item->GetSchedulePhase() == SchedulePhase::kPrologue) {
+      rejected.push_back(item);
+      continue;
+    }
     if (item->IsControl()) {
       rejected.push_back(item);
       continue;

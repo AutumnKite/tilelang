@@ -417,12 +417,19 @@ private:
           } else {
             // Generic T.copy(): check if TMA is possible.
             arith::Analyzer ana;
-            if (!copy->GetDisableTMA() &&
-                copy->CheckBulkLoad(target, &ana, /*check_last_dim=*/true)) {
-              found_tma = true;
-              found_tma_load = true;
+            if (!copy->GetDisableTMA()) {
+              if (copy->CheckBulkLoad(target, &ana, /*check_last_dim=*/true)) {
+                found_tma = true;
+                found_tma_load = true;
+              }
+              if (copy->CheckBulkStore(target, &ana, /*check_last_dim=*/true)) {
+                found_tma = true;
+              }
             }
           }
+          LOG(INFO) << "ResourceAnalyzer: Detected copy-like operation: " << op_name
+                    << ", found_tma=" << found_tma
+                    << ", found_tma_load=" << found_tma_load;
         } else if (op->op.same_as(gemm_py_op) || op->op.same_as(gemm_op) ||
                    op->op.same_as(wgmma_gemm_py_op) ||
                    op->op.same_as(wgmma_gemm_op) ||
