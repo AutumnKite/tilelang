@@ -33,9 +33,9 @@ class IfNode;
 
 // Scheduling phase: separates "when does this task run" from "which warpgroup"
 enum class SchedulePhase : uint8_t {
-  kBody = 0,      // Normal body task - participates in warpgroup partition
-  kPrologue = 1,  // Runs on ALL threads BEFORE warpgroup-specific code
-  kEpilogue = 2,  // Runs on ALL threads AFTER warpgroup-specific code
+  kBody = 0,     // Normal body task - participates in warpgroup partition
+  kPrologue = 1, // Runs on ALL threads BEFORE warpgroup-specific code
+  kEpilogue = 2, // Runs on ALL threads AFTER warpgroup-specific code
 };
 
 // Structure to store region access information with warpgroup id
@@ -135,9 +135,13 @@ public:
   virtual int GetWarpgroupId() const { return -1; }
 
   // Get scheduling phase for this node
-  virtual SchedulePhase GetSchedulePhase() const { return SchedulePhase::kBody; }
+  virtual SchedulePhase GetSchedulePhase() const {
+    return SchedulePhase::kBody;
+  }
   // Convenience: true if this node is prologue or epilogue (not body)
-  virtual bool IsNeutralPhase() const { return GetSchedulePhase() != SchedulePhase::kBody; }
+  virtual bool IsNeutralPhase() const {
+    return GetSchedulePhase() != SchedulePhase::kBody;
+  }
 
   virtual bool containWarpgroupId(int id) const = 0;
 
@@ -1332,10 +1336,13 @@ inline void PrintIRStructure(const IRStructure *node, int indent = 0) {
     LOG(INFO) << indent_str << "  latency: " << task->GetLatency() << " cycles";
     LOG(INFO) << indent_str << "  II: " << task->GetII() << " cycles";
     LOG(INFO) << indent_str << "  warpgroup_id: " << task->GetWarpgroupId();
-    LOG(INFO) << indent_str << "  schedule_phase: " << static_cast<int>(task->GetSchedulePhase())
-              << (task->GetSchedulePhase() == SchedulePhase::kPrologue ? " (prologue)"
-                  : task->GetSchedulePhase() == SchedulePhase::kEpilogue ? " (epilogue)"
-                  : " (body)");
+    LOG(INFO) << indent_str << "  schedule_phase: "
+              << static_cast<int>(task->GetSchedulePhase())
+              << (task->GetSchedulePhase() == SchedulePhase::kPrologue
+                      ? " (prologue)"
+                  : task->GetSchedulePhase() == SchedulePhase::kEpilogue
+                      ? " (epilogue)"
+                      : " (body)");
   } else if (node->IsControl()) {
     const ControlNode *control = static_cast<const ControlNode *>(node);
     LOG(INFO) << indent_str << "ControlNode (For loop):";

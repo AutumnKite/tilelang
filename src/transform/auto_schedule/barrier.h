@@ -638,7 +638,8 @@ AnalyzeSequenceNodeBarriers(SequenceNode *seq, int &next_barrier_id,
         bool found_wgmma = false;
         for (const auto &region_access : task->GetReadWriteRegions()) {
           int wg_id = region_access.warpgroup_id;
-          if (wg_id == -1 || region_access.schedule_phase != SchedulePhase::kBody)
+          if (wg_id == -1 ||
+              region_access.schedule_phase != SchedulePhase::kBody)
             continue;
           auto &region = region_access.region;
           if (IsRegisterRegion(region)) {
@@ -710,12 +711,6 @@ AnalyzeSequenceNodeBarriers(SequenceNode *seq, int &next_barrier_id,
       auto child = static_cast<TaskNode *>(task->child.get());
       if (child->HasTMALoad()) {
         int wg_id = child->GetWarpgroupId();
-        LOG(INFO) << "[DEBUG] AnalyzeSequenceNodeBarriers: TMA load found, wg_id="
-                  << wg_id << " has_tma_load=" << child->HasTMALoad()
-                  << " phase=" << static_cast<int>(child->GetSchedulePhase());
-        for (auto &stmt : child->stmts) {
-          LOG(INFO) << "[DEBUG]   stmt: " << stmt;
-        }
         if (!child->IsNeutralPhase()) {
           int barrier_id = next_barrier_id++;
           Buffer barrier_buffer = makeBarrierBuffer(
@@ -728,8 +723,6 @@ AnalyzeSequenceNodeBarriers(SequenceNode *seq, int &next_barrier_id,
           Stmt arrive_stmt = makeBarrierArrive(barrier_load);
           InsertStatementIntoScheduleUnit(task, arrive_stmt, false, wg_id);
         } else {
-          LOG(INFO) << "[DEBUG] AnalyzeSequenceNodeBarriers: TMA load with wg_id=-1 (NEUTRAL), "
-                    << "reusing neutral_sync_shared_barrier for ALL neutral TMA loads!";
           PrimExpr barrier_load = BufferLoad(neutral_sync_shared_barrier, {0});
           RewriteCopyMbar(child, barrier_load);
         }
@@ -763,10 +756,6 @@ AnalyzeSequenceNodeBarriers(SequenceNode *seq, int &next_barrier_id,
       for (const auto &region_access : task->GetReadWriteRegions()) {
         int wg_id = region_access.warpgroup_id;
         if (region_access.schedule_phase != SchedulePhase::kBody) {
-          LOG(INFO) << "[DEBUG] Barrier dep analysis: SKIPPING region with phase="
-                    << static_cast<int>(region_access.schedule_phase) << " wg_id=" << wg_id
-                    << " buffer=" << region_access.region->buffer->name
-                    << " is_write=" << region_access.is_write;
           continue;
         }
         if (wg_id == -1)
@@ -974,7 +963,8 @@ AnalyzeControlNodeBarriers(ControlNode *ctrl, int &next_barrier_id,
             bool found_wgmma = false;
             for (const auto &region_access : task->GetReadWriteRegions()) {
               int wg_id = region_access.warpgroup_id;
-              if (wg_id == -1 || region_access.schedule_phase != SchedulePhase::kBody)
+              if (wg_id == -1 ||
+                  region_access.schedule_phase != SchedulePhase::kBody)
                 continue;
               auto &region = region_access.region;
               if (IsRegisterRegion(region)) {
@@ -990,7 +980,8 @@ AnalyzeControlNodeBarriers(ControlNode *ctrl, int &next_barrier_id,
         } else {
           for (const auto &region_access : task->GetReadWriteRegions()) {
             int wg_id = region_access.warpgroup_id;
-            if (wg_id == -1 || region_access.schedule_phase != SchedulePhase::kBody)
+            if (wg_id == -1 ||
+                region_access.schedule_phase != SchedulePhase::kBody)
               continue;
             auto &region = region_access.region;
             if (IsRegisterRegion(region)) {
@@ -1029,7 +1020,8 @@ AnalyzeControlNodeBarriers(ControlNode *ctrl, int &next_barrier_id,
             }
           }
           int wg_id = child->GetWarpgroupId();
-          ICHECK(!child->IsNeutralPhase()) << "TCGEN05MMA must not be in prologue/epilogue";
+          ICHECK(!child->IsNeutralPhase())
+              << "TCGEN05MMA must not be in prologue/epilogue";
 
           int barrier_id = next_barrier_id++;
           // Create a single barrier buffer with shape (num_versions,)
@@ -1063,7 +1055,8 @@ AnalyzeControlNodeBarriers(ControlNode *ctrl, int &next_barrier_id,
             }
           }
           int wg_id = child->GetWarpgroupId();
-          ICHECK(!child->IsNeutralPhase()) << "TMA loads in pipeline must not be in prologue/epilogue";
+          ICHECK(!child->IsNeutralPhase())
+              << "TMA loads in pipeline must not be in prologue/epilogue";
 
           int barrier_id = next_barrier_id++;
           Buffer barrier_buffer = makeBarrierBuffer(
