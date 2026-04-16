@@ -31,14 +31,24 @@ class SequenceNode;
 class WrapperNode;
 class IfNode;
 
+// Scheduling phase: separates "when does this task run" from "which warpgroup"
+enum class SchedulePhase : uint8_t {
+  kBody = 0,      // Normal body task - participates in warpgroup partition
+  kPrologue = 1,  // Runs on ALL threads BEFORE warpgroup-specific code
+  kEpilogue = 2,  // Runs on ALL threads AFTER warpgroup-specific code
+};
+
 // Structure to store region access information with warpgroup id
 struct RegionAccessInfo {
   BufferRegion region;
   bool is_write;    // true for write, false for read
   int warpgroup_id; // warpgroup id of the innermost TaskNode
+  SchedulePhase schedule_phase{SchedulePhase::kBody}; // scheduling phase
 
-  RegionAccessInfo(BufferRegion region, bool is_write, int warpgroup_id)
-      : region(region), is_write(is_write), warpgroup_id(warpgroup_id) {}
+  RegionAccessInfo(BufferRegion region, bool is_write, int warpgroup_id,
+                   SchedulePhase phase = SchedulePhase::kBody)
+      : region(region), is_write(is_write), warpgroup_id(warpgroup_id),
+        schedule_phase(phase) {}
 };
 
 // Helper function to compare if two regions are equal
@@ -124,6 +134,11 @@ public:
   // Get warpgroup id for this node (-1 if not applicable)
   virtual int GetWarpgroupId() const { return -1; }
 
+  // Get scheduling phase for this node
+  virtual SchedulePhase GetSchedulePhase() const { return SchedulePhase::kBody; }
+  // Convenience: true if this node is prologue or epilogue (not body)
+  virtual bool IsNeutralPhase() const { return GetSchedulePhase() != SchedulePhase::kBody; }
+
   virtual bool containWarpgroupId(int id) const = 0;
 
   // Check if this node (or any descendant) contains a loop_break call
@@ -193,6 +208,13 @@ public:
   // Warpgroup id for warpgroup specialization
   void SetWarpgroupId(int warpgroup_id) { warpgroup_id_ = warpgroup_id; }
   int GetWarpgroupId() const override { return warpgroup_id_; }
+
+  // Scheduling phase (prologue / body / epilogue)
+  void SetSchedulePhase(SchedulePhase phase) { schedule_phase_ = phase; }
+  SchedulePhase GetSchedulePhase() const override { return schedule_phase_; }
+  bool IsNeutralPhase() const override {
+    return schedule_phase_ != SchedulePhase::kBody;
+  }
 
   // TMA load flag
   void SetHasTMALoad(bool value) { has_tma_load_ = value; }
@@ -336,6 +358,8 @@ private:
   int64_t ii_{0};      // Initiation interval in cycles
   int warpgroup_id_{
       -1}; // Warpgroup id for warpgroup specialization (-1 means unassigned)
+  SchedulePhase schedule_phase_{
+      SchedulePhase::kBody}; // Scheduling phase (prologue/body/epilogue)
 
   // TMA information
   bool has_tma_load_{false};
@@ -870,6 +894,14 @@ public:
     const TaskNode *task = static_cast<const TaskNode *>(child.get());
     return task->GetWarpgroupId();
   }
+  SchedulePhase GetSchedulePhase() const override {
+    if (!isInnerTask())
+      return SchedulePhase::kBody;
+    return static_cast<const TaskNode *>(child.get())->GetSchedulePhase();
+  }
+  bool IsNeutralPhase() const override {
+    return GetSchedulePhase() != SchedulePhase::kBody;
+  }
 
   // Clone method
   std::shared_ptr<IRStructure> Clone() const override;
@@ -1300,6 +1332,10 @@ inline void PrintIRStructure(const IRStructure *node, int indent = 0) {
     LOG(INFO) << indent_str << "  latency: " << task->GetLatency() << " cycles";
     LOG(INFO) << indent_str << "  II: " << task->GetII() << " cycles";
     LOG(INFO) << indent_str << "  warpgroup_id: " << task->GetWarpgroupId();
+    LOG(INFO) << indent_str << "  schedule_phase: " << static_cast<int>(task->GetSchedulePhase())
+              << (task->GetSchedulePhase() == SchedulePhase::kPrologue ? " (prologue)"
+                  : task->GetSchedulePhase() == SchedulePhase::kEpilogue ? " (epilogue)"
+                  : " (body)");
   } else if (node->IsControl()) {
     const ControlNode *control = static_cast<const ControlNode *>(node);
     LOG(INFO) << indent_str << "ControlNode (For loop):";

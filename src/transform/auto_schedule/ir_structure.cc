@@ -260,6 +260,8 @@ std::shared_ptr<IRStructure> TaskNode::Clone() const {
   new_task->SetStartTime(GetStartTime());
   // Copy warpgroup id
   new_task->SetWarpgroupId(GetWarpgroupId());
+  // Copy scheduling phase
+  new_task->SetSchedulePhase(GetSchedulePhase());
   // Copy loop_break cache
   new_task->contains_loop_break_cache_ = contains_loop_break_cache_;
   return new_task;
@@ -269,12 +271,13 @@ void TaskNode::CollectRegions(
     std::vector<RegionAccessInfo> &result,
     std::set<std::pair<Buffer, std::pair<int, int>>> &visited) const {
   int wg_id = GetWarpgroupId();
+  SchedulePhase phase = GetSchedulePhase();
   // Collect write regions
   for (const auto &region : GetWriteRegions()) {
     auto key = std::make_pair(region->buffer, std::make_pair(true, wg_id));
     if (visited.find(key) == visited.end()) {
       visited.insert(key);
-      result.emplace_back(region, true, wg_id);
+      result.emplace_back(region, true, wg_id, phase);
     }
   }
   // Collect read regions
@@ -282,7 +285,7 @@ void TaskNode::CollectRegions(
     auto key = std::make_pair(region->buffer, std::make_pair(false, wg_id));
     if (visited.find(key) == visited.end()) {
       visited.insert(key);
-      result.emplace_back(region, false, wg_id);
+      result.emplace_back(region, false, wg_id, phase);
     }
   }
 }
