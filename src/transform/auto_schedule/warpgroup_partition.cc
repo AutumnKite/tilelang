@@ -1063,32 +1063,10 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
       thread_count.begin() + 1, thread_count.end(), thread_count[0]);
 
   Stmt pro_and_warpgroup_stmt;
-  if (wg_pro_neutral_has_stmts) {
-    if (!IsEvaluateZero(if_then_else) && !IsEvaluateZero(pro_neutral_body)) {
-      // Both have statements: insert barriers for neutral-to-warpgroup
-      // synchronization
-      pro_and_warpgroup_stmt = InsertBarriersForNeutralSync(
-          pro_neutral_body, if_then_else, barrier_buffers, barrier_map,
-          updated_thread_extent, neutral_sync_shared_barrier);
-    } else if (!IsEvaluateZero(if_then_else) ||
-               !IsEvaluateZero(pro_neutral_body)) {
-      // Only one has actual statements
-      std::vector<Stmt> stmts;
-      if (!IsEvaluateZero(pro_neutral_body)) {
-        stmts.push_back(pro_neutral_body);
-      }
-      if (!IsEvaluateZero(if_then_else)) {
-        stmts.push_back(if_then_else);
-      }
-      if (stmts.size() == 1) {
-        pro_and_warpgroup_stmt = stmts[0];
-      } else {
-        pro_and_warpgroup_stmt = SeqStmt(stmts);
-      }
-    } else {
-      // Both are empty
-      pro_and_warpgroup_stmt = Evaluate(0);
-    }
+  if (wg_pro_neutral_has_stmts && !IsEvaluateZero(pro_neutral_body)) {
+    pro_and_warpgroup_stmt = InsertBarriersForNeutralSync(
+        pro_neutral_body, if_then_else, barrier_buffers, barrier_map,
+        updated_thread_extent, neutral_sync_shared_barrier);
   } else {
     pro_and_warpgroup_stmt = if_then_else;
   }

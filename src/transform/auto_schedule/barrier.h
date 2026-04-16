@@ -257,10 +257,6 @@ static Stmt InsertBarriersForNeutralSyncWithDependency(
     Buffer neutral_sync_shared_barrier = Buffer(), Var thread_var = Var(),
     PrimExpr tensor_core_wg_start = PrimExpr(),
     PrimExpr tensor_core_wg_end = PrimExpr()) {
-  if (IsEvaluateZero(producer_body) || IsEvaluateZero(consumer_body)) {
-    return SeqStmt({producer_body, consumer_body});
-  }
-
   if (!need_regular_barrier && !need_tmem_barrier) {
     return SeqStmt({producer_body, consumer_body});
   }
@@ -618,6 +614,7 @@ GetSyncInfos(const std::vector<ScheduleUnit *> &units, int num_wgs,
           int wg_id = region_access.warpgroup_id;
           if (region_access.schedule_phase != SchedulePhase::kBody)
             continue;
+          ICHECK(0 <= wg_id && wg_id < num_wgs);
           if (region_access.region->buffer != buffer)
             continue;
           auto add_sync = [&](ScheduleUnit *wait_unit, int wait_wg_id) {
@@ -708,6 +705,7 @@ static void InsertSynchronization(
     if (unit->HasWGMMA() && unit->isInnerTask()) {
       int wg_id = static_cast<TaskNode *>(unit->child.get())->GetWarpgroupId();
       if (unit->GetSchedulePhase() == SchedulePhase::kBody) {
+        ICHECK(0 <= wg_id && wg_id < num_wgs);
         ++wgmma_count[wg_id];
       } else {
         LOG(FATAL) << "WGMMA task without valid warpgroup id";
