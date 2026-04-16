@@ -888,7 +888,8 @@ AnalyzeSequenceNodeBarriers(SequenceNode *seq, int &next_barrier_id,
   for (auto task : tasks) {
     if (task->isInnerTask() && task->UsesTMACore()) {
       auto child = static_cast<TaskNode *>(task->child.get());
-      if (child->HasTMALoad() && child->GetSchedulePhase() == SchedulePhase::kPrologue) {
+      if (child->HasTMALoad() &&
+          child->GetSchedulePhase() == SchedulePhase::kPrologue) {
         PrimExpr barrier_load = BufferLoad(neutral_sync_shared_barrier, {0});
         RewriteCopyMbar(child, barrier_load);
       }

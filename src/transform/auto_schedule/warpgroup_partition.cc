@@ -131,6 +131,10 @@ CloneIRStructureWithWarpgroupFilter(IRStructure *node, int warpgroup_id,
 
   if (node->IsTask()) {
     auto task = static_cast<TaskNode *>(node);
+    if (task->GetSchedulePhase() != SchedulePhase::kBody) {
+      auto new_task = std::make_shared<TaskNode>();
+      return new_task;
+    }
 
     // LetDecl tasks are always included in every warp group clone.
     // Create a fresh variable copy so the two warp groups use different names.
@@ -799,57 +803,6 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
 
   size_t num_wgs = thread_count.size();
 
-  // Helper function to clone IRStructure filtering tasks with warpgroup_id ==
-  // -1 (neutral tasks)
-  std::function<std::shared_ptr<IRStructure>(IRStructure *)>
-      clone_neutral_filter;
-  clone_neutral_filter =
-      [&clone_neutral_filter](
-          IRStructure *node) -> std::shared_ptr<IRStructure> {
-    if (!node)
-      return nullptr;
-
-    if (node->IsTask()) {
-      auto task = static_cast<TaskNode *>(node);
-      if (task->IsNeutralPhase()) {
-        return task->Clone();
-      } else {
-        auto new_task = std::make_shared<TaskNode>();
-        // Empty statements
-        return new_task;
-      }
-    } else if (node->IsSequence()) {
-      auto seq = static_cast<SequenceNode *>(node);
-      auto new_seq = std::make_shared<SequenceNode>();
-      for (const auto &child : seq->children) {
-        if (child) {
-          auto node = static_cast<ScheduleUnit *>(child.get());
-          auto new_node = clone_neutral_filter(node->child.get());
-          if (new_node) {
-            auto new_unit = std::make_shared<ScheduleUnit>();
-            new_unit->child = std::move(new_node);
-            new_seq->children.push_back(std::move(new_unit));
-          }
-        }
-      }
-      return new_seq;
-    } else if (node->IsWrapper()) {
-      auto wrapper = static_cast<WrapperNode *>(node);
-      auto new_wrapper = std::make_shared<WrapperNode>();
-      new_wrapper->child = clone_neutral_filter(wrapper->child.get());
-      if (new_wrapper->child) {
-        return new_wrapper;
-      }
-      return nullptr;
-    } else if (node->IsControl()) {
-      return nullptr;
-    } else if (node->IsIf()) {
-      return nullptr;
-    }
-    LOG(FATAL);
-    return nullptr;
-  };
-
   auto has_actual_statements = [](IRStructure *node) -> bool {
     if (!node)
       return false;
@@ -863,50 +816,42 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
     return false;
   };
 
-  std::function<std::shared_ptr<IRStructure>(
-      IRStructure *, const std::function<bool(int)> &, int)>
-      clone_neutral_filter_with_top_level;
-  clone_neutral_filter_with_top_level =
-      [&clone_neutral_filter_with_top_level, &clone_neutral_filter](
-          IRStructure *node, const std::function<bool(int)> &include_top_level,
-          int top_level_index) -> std::shared_ptr<IRStructure> {
+  std::function<std::shared_ptr<IRStructure>(IRStructure *, SchedulePhase)>
+      clone_phase_filter;
+  clone_phase_filter =
+      [&clone_phase_filter](
+          IRStructure *node,
+          SchedulePhase phase) -> std::shared_ptr<IRStructure> {
     if (!node)
       return nullptr;
 
     if (node->IsTask()) {
-      if (include_top_level(top_level_index)) {
-        return clone_neutral_filter(node);
+      auto task = static_cast<TaskNode *>(node);
+      if (task->GetSchedulePhase() == phase) {
+        return task->Clone();
       } else {
         auto new_task = std::make_shared<TaskNode>();
-        // Empty statements
         return new_task;
       }
     } else if (node->IsSequence()) {
       auto seq = static_cast<SequenceNode *>(node);
       auto new_seq = std::make_shared<SequenceNode>();
-      int child_index = 0;
       for (const auto &child : seq->children) {
         if (child) {
           auto schedule_unit = static_cast<ScheduleUnit *>(child.get());
-          int next_top_level_index =
-              top_level_index == -1 ? child_index : top_level_index;
-          auto new_node = clone_neutral_filter_with_top_level(
-              schedule_unit->child.get(), include_top_level,
-              next_top_level_index);
+          auto new_node = clone_phase_filter(schedule_unit->child.get(), phase);
           if (new_node) {
             auto new_unit = std::make_shared<ScheduleUnit>();
             new_unit->child = std::move(new_node);
             new_seq->children.push_back(std::move(new_unit));
           }
         }
-        child_index++;
       }
       return new_seq;
     } else if (node->IsWrapper()) {
       auto wrapper = static_cast<WrapperNode *>(node);
       auto new_wrapper = std::make_shared<WrapperNode>();
-      new_wrapper->child = clone_neutral_filter_with_top_level(
-          wrapper->child.get(), include_top_level, top_level_index);
+      new_wrapper->child = clone_phase_filter(wrapper->child.get(), phase);
       if (new_wrapper->child) {
         return new_wrapper;
       }
@@ -920,76 +865,10 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
     return nullptr;
   };
 
-  // Determine which top-level neutral children should be epi (run after
-  // warpgroup-partitioned code). A neutral child is epi if it directly or
-  // transitively depends on warpgroup task output.
-  std::unordered_set<const Object *> wg_write_buffers;
-  std::unordered_set<int> depends_on_wg_output;
-  // Per-child write buffers and read buffers for neutral children
-  struct ChildBufferInfo {
-    std::unordered_set<const Object *> read_bufs;
-    std::unordered_set<const Object *> write_bufs;
-    bool all_neutral = true;
-  };
-  std::vector<ChildBufferInfo> child_infos;
-  if (root->IsSequence()) {
-    auto seq = static_cast<SequenceNode *>(root);
-    child_infos.resize(seq->children.size());
-    for (size_t i = 0; i < seq->children.size(); ++i) {
-      const auto &child = seq->children[i];
-      if (!child)
-        continue;
-      auto unit = static_cast<ScheduleUnit *>(child.get());
-      std::vector<TaskNodeWithContext> child_tasks;
-      CollectAllTaskNodesWithContext(unit->child.get(), child_tasks);
-      auto &info = child_infos[i];
-      for (const auto &task : child_tasks) {
-        if (!task.task->IsNeutralPhase()) {
-          info.all_neutral = false;
-          for (const auto &wr : task.task->GetWriteRegions())
-            wg_write_buffers.insert(wr->buffer.get());
-        }
-        for (const auto &rd : task.task->GetReadRegions())
-          info.read_bufs.insert(rd->buffer.get());
-        for (const auto &wr : task.task->GetWriteRegions())
-          info.write_bufs.insert(wr->buffer.get());
-      }
-    }
-    // Transitive fixpoint: if a neutral child reads from wg_write_buffers,
-    // mark it as epi and add its write buffers to wg_write_buffers so that
-    // other neutral children that depend on it are also marked epi.
-    bool changed = true;
-    while (changed) {
-      changed = false;
-      for (size_t i = 0; i < child_infos.size(); ++i) {
-        if (!child_infos[i].all_neutral)
-          continue;
-        if (depends_on_wg_output.count(static_cast<int>(i)))
-          continue;
-        for (const auto *buf : child_infos[i].read_bufs) {
-          if (wg_write_buffers.count(buf)) {
-            depends_on_wg_output.insert(static_cast<int>(i));
-            for (const auto *wb : child_infos[i].write_bufs)
-              wg_write_buffers.insert(wb);
-            changed = true;
-            break;
-          }
-        }
-      }
-    }
-  }
-
-  auto is_epi_top_level_index = [&depends_on_wg_output](int top_level_index) {
-    return depends_on_wg_output.count(top_level_index) > 0;
-  };
-  auto is_pro_top_level_index = [is_epi_top_level_index](int top_level_index) {
-    return !is_epi_top_level_index(top_level_index);
-  };
-
   auto wg_pro_neutral_structure =
-      clone_neutral_filter_with_top_level(root, is_pro_top_level_index, -1);
+      clone_phase_filter(root, SchedulePhase::kPrologue);
   auto wg_epi_neutral_structure =
-      clone_neutral_filter_with_top_level(root, is_epi_top_level_index, -1);
+      clone_phase_filter(root, SchedulePhase::kEpilogue);
   // wg_children[wg_id][child_index] = filtered IRStructure (nullptr if absent)
   std::vector<std::vector<std::shared_ptr<IRStructure>>> wg_children(num_wgs);
   std::vector<std::shared_ptr<IRStructure>> wg_structures(num_wgs);
