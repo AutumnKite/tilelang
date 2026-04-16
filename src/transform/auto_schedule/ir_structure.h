@@ -214,10 +214,7 @@ public:
   int GetWarpgroupId() const override { return warpgroup_id_; }
 
   // Scheduling phase (prologue / body / epilogue)
-  void SetSchedulePhase(SchedulePhase phase) {
-    schedule_phase_ = phase;
-    warpgroup_id_ = 0;
-  }
+  void SetSchedulePhase(SchedulePhase phase) { schedule_phase_ = phase; }
   SchedulePhase GetSchedulePhase() const override { return schedule_phase_; }
   bool IsNeutralPhase() const override {
     return schedule_phase_ != SchedulePhase::kBody;

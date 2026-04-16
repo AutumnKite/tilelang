@@ -707,7 +707,7 @@ static void InsertSynchronization(
     }
     if (unit->HasWGMMA() && unit->isInnerTask()) {
       int wg_id = static_cast<TaskNode *>(unit->child.get())->GetWarpgroupId();
-      if (unit->GetSchedulePhase() != SchedulePhase::kBody) {
+      if (unit->GetSchedulePhase() == SchedulePhase::kBody) {
         ++wgmma_count[wg_id];
       } else {
         LOG(FATAL) << "WGMMA task without valid warpgroup id";
