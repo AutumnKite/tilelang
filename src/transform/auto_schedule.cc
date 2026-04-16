@@ -54,6 +54,7 @@
 #include <vector>
 
 #include "../op/builtin.h"
+#include "../op/copy.h"
 #include "../op/gemm_py.h"
 #include "../target/utils.h"
 #include "./common/attr.h"
@@ -392,35 +393,43 @@ private:
         }
 
         // Check if this is a TMA copy operation
-        if (op->op.same_as(copy_op)) {
-          bool found_global = false, found_shared = false;
-          int idx_global = -1, idx_shared = -1;
-          for (unsigned idx = 0; idx != 2; ++idx) {
-            auto region = Downcast<Call>(op->args[idx]);
-            if (const auto *buffer_load =
-                    region->args[0].as<BufferLoadNode>()) {
-              Buffer buffer = buffer_load->buffer;
-              String scope = buffer.scope();
-              MemoryType mem_type = GetMemoryTypeFromScope(scope);
-              if (mem_type == MemoryType::kGlobal) {
-                found_global = true;
-                idx_global = idx;
-              }
-              if (mem_type == MemoryType::kShared) {
-                found_shared = true;
-                idx_shared = idx;
-              }
-            }
-          }
-          found_tma = false;
-          if (found_global && found_shared) {
-            if (idx_global == 0 && idx_shared == 1) {
+        static const auto tma_copy_op = Op::Get("tl.tileop.tma_copy");
+        static const auto async_copy_op = Op::Get("tl.tileop.async_copy");
+
+        bool is_copy_like = op->op.same_as(copy_op) ||
+                            op->op.same_as(tma_copy_op) ||
+                            op->op.same_as(async_copy_op);
+
+        if (is_copy_like) {
+          Copy copy_obj(op->args, op->annotations);
+          const CopyNode *copy = copy_obj.get();
+
+          if (copy->GetIsAsyncCopy()) {
+            // T.async_copy() — cp.async path, never TMA.
+          } else if (copy->GetIsTmaCopy()) {
+            // Explicit T.tma_copy(): only valid global->shared TMA loads
+            // are producers; TMA stores stay on the consumer side.
+            arith::Analyzer ana;
+            if (copy->CheckBulkLoad(target, &ana, /*check_last_dim=*/false)) {
               found_tma = true;
               found_tma_load = true;
             }
-            if (idx_global == 1 && idx_shared == 0)
-              found_tma = true;
+          } else {
+            // Generic T.copy(): check if TMA is possible.
+            arith::Analyzer ana;
+            if (!copy->GetDisableTMA()) {
+              if (copy->CheckBulkLoad(target, &ana, /*check_last_dim=*/true)) {
+                found_tma = true;
+                found_tma_load = true;
+              }
+              if (copy->CheckBulkStore(target, &ana, /*check_last_dim=*/true)) {
+                found_tma = true;
+              }
+            }
           }
+          LOG(INFO) << "ResourceAnalyzer: Detected copy-like operation: " << op_name
+                    << ", found_tma=" << found_tma
+                    << ", found_tma_load=" << found_tma_load;
         } else if (op->op.same_as(gemm_py_op) || op->op.same_as(gemm_op) ||
                    op->op.same_as(wgmma_gemm_py_op) ||
                    op->op.same_as(wgmma_gemm_op) ||

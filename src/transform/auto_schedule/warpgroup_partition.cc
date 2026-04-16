@@ -643,7 +643,17 @@ Stmt ConvertIRStructureToStmt(IRStructure *structure,
       enable_pro = false;
     }
 
-    bool enable_epi = outer_enable_epi && enable_pro;
+    bool enable_epi = enable_pro;
+
+    // Read num_stages from loop annotation for prologue extent
+    int num_stages_annotation = max_stages - min_stages;
+    auto num_stages_val = ctrl->control.get()->annotations.Get("num_stages");
+    if (num_stages_val.has_value()) {
+      num_stages_annotation = num_stages_val.value().cast<IntImm>()->value;
+    }
+    int prologue_extent = 2 * num_stages_annotation;
+    int epilogue_extent = max_stages - min_stages;
+
     std::vector<Stmt> steady;
 
     for (auto &child : seq->children) {
@@ -706,10 +716,10 @@ Stmt ConvertIRStructureToStmt(IRStructure *structure,
       new_for.CopyOnWrite()->loop_var = pro;
       new_for.CopyOnWrite()->kind = ForKind::kUnrolled;
       new_for.CopyOnWrite()->extent =
-          min(max_stages - min_stages, for_op.get()->extent);
-      for_op.CopyOnWrite()->min += loop_step * (max_stages - min_stages);
+          min(prologue_extent, for_op.get()->extent);
+      for_op.CopyOnWrite()->min += loop_step * prologue_extent;
       for_op.CopyOnWrite()->extent =
-          max(0, for_op.get()->extent - (max_stages - min_stages));
+          max(0, for_op.get()->extent - prologue_extent);
       prologue = Substitute(new_for, sub);
     }
     Stmt epilogue = Evaluate(0);
@@ -722,11 +732,11 @@ Stmt ConvertIRStructureToStmt(IRStructure *structure,
       new_for.CopyOnWrite()->kind = ForKind::kUnrolled;
       new_for.CopyOnWrite()->min =
           for_op.get()->min +
-          loop_step * (for_op.get()->extent - (max_stages - min_stages));
+          loop_step * (for_op.get()->extent - epilogue_extent);
       new_for.CopyOnWrite()->extent =
-          min(max_stages - min_stages, for_op.get()->extent);
+          min(epilogue_extent, for_op.get()->extent);
       for_op.CopyOnWrite()->extent =
-          max(0, for_op.get()->extent - (max_stages - min_stages));
+          max(0, for_op.get()->extent - epilogue_extent);
       epilogue = Substitute(new_for, sub);
     }
     return SeqStmt({prologue, for_op, epilogue});
@@ -801,7 +811,7 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
 
     if (node->IsTask()) {
       auto task = static_cast<TaskNode *>(node);
-      if (task->GetWarpgroupId() == -1) {
+      if (task->IsNeutralPhase()) {
         return task->Clone();
       } else {
         auto new_task = std::make_shared<TaskNode>();
@@ -934,7 +944,7 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
       CollectAllTaskNodesWithContext(unit->child.get(), child_tasks);
       auto &info = child_infos[i];
       for (const auto &task : child_tasks) {
-        if (task.task->GetWarpgroupId() >= 0) {
+        if (!task.task->IsNeutralPhase()) {
           info.all_neutral = false;
           for (const auto &wr : task.task->GetWriteRegions())
             wg_write_buffers.insert(wr->buffer.get());

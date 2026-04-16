@@ -616,7 +616,7 @@ GetSyncInfos(const std::vector<ScheduleUnit *> &units, int num_wgs,
       for (ScheduleUnit *unit : units) {
         for (const auto &region_access : unit->GetReadWriteRegions()) {
           int wg_id = region_access.warpgroup_id;
-          if (wg_id == -1)
+          if (region_access.schedule_phase != SchedulePhase::kBody)
             continue;
           if (region_access.region->buffer != buffer)
             continue;
@@ -649,7 +649,7 @@ GetSyncInfos(const std::vector<ScheduleUnit *> &units, int num_wgs,
         if (iter == 0) {
           for (const auto &region_access : unit->GetReadWriteRegions()) {
             int wg_id = region_access.warpgroup_id;
-            if (wg_id == -1)
+            if (region_access.schedule_phase != SchedulePhase::kBody)
               continue;
             if (region_access.region->buffer != buffer)
               continue;
@@ -663,7 +663,7 @@ GetSyncInfos(const std::vector<ScheduleUnit *> &units, int num_wgs,
           }
           for (const auto &region_access : unit->GetReadWriteRegions()) {
             int wg_id = region_access.warpgroup_id;
-            if (wg_id == -1)
+            if (region_access.schedule_phase != SchedulePhase::kBody)
               continue;
             if (region_access.region->buffer != buffer)
               continue;
@@ -707,7 +707,7 @@ static void InsertSynchronization(
     }
     if (unit->HasWGMMA() && unit->isInnerTask()) {
       int wg_id = static_cast<TaskNode *>(unit->child.get())->GetWarpgroupId();
-      if (wg_id != -1) {
+      if (unit->GetSchedulePhase() != SchedulePhase::kBody) {
         ++wgmma_count[wg_id];
       } else {
         LOG(FATAL) << "WGMMA task without valid warpgroup id";
@@ -888,7 +888,7 @@ AnalyzeSequenceNodeBarriers(SequenceNode *seq, int &next_barrier_id,
   for (auto task : tasks) {
     if (task->isInnerTask() && task->UsesTMACore()) {
       auto child = static_cast<TaskNode *>(task->child.get());
-      if (child->HasTMALoad() && child->GetWarpgroupId() == -1) {
+      if (child->HasTMALoad() && child->GetSchedulePhase() == SchedulePhase::kPrologue) {
         PrimExpr barrier_load = BufferLoad(neutral_sync_shared_barrier, {0});
         RewriteCopyMbar(child, barrier_load);
       }

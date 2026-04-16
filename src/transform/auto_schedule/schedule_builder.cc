@@ -268,6 +268,10 @@ void CollectSuffixTasks(IRStructure *root,
   std::unordered_set<TaskNode *> candidate_set;
   for (int i = static_cast<int>(items.size()) - 1; i >= 0; --i) {
     auto *item = items[i];
+    if (item->GetSchedulePhase() == SchedulePhase::kPrologue) {
+      rejected.push_back(item);
+      continue;
+    }
     if (item->IsControl()) {
       rejected.push_back(item);
       continue;
@@ -375,9 +379,15 @@ AssignWarpgroupIdsGlobal(IRStructure *root, const WarpSpecializeConfig &config,
 
   std::unordered_set<TaskNode *> prefix_tasks;
   CollectPrefixTasks(root, prefix_tasks);
+  for (auto *task : prefix_tasks) {
+    task->SetSchedulePhase(SchedulePhase::kPrologue);
+  }
 
   std::unordered_set<TaskNode *> suffix_tasks;
   CollectSuffixTasks(root, all_tasks, uf, suffix_tasks);
+  for (auto *task : suffix_tasks) {
+    task->SetSchedulePhase(SchedulePhase::kEpilogue);
+  }
 
   std::unordered_map<int, std::vector<int>> components;
   for (int i = 0; i < n; i++) {
@@ -716,6 +726,7 @@ NaiveAssignWarpgroupIds(IRStructure *root, const WarpSpecializeConfig &config,
   CollectPrefixTasks(root, prefix_tasks);
   for (auto *task : prefix_tasks) {
     task->SetWarpgroupId(-1);
+    task->SetSchedulePhase(SchedulePhase::kPrologue);
   }
 
   int n = all_tasks.size();
@@ -731,6 +742,7 @@ NaiveAssignWarpgroupIds(IRStructure *root, const WarpSpecializeConfig &config,
   CollectSuffixTasks(root, all_tasks, uf, suffix_tasks);
   for (auto *task : suffix_tasks) {
     task->SetWarpgroupId(-1);
+    task->SetSchedulePhase(SchedulePhase::kEpilogue);
   }
 
   // no double_thread in naive mode
