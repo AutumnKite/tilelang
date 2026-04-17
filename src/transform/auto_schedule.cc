@@ -55,7 +55,7 @@
 
 #include "../op/builtin.h"
 #include "../op/copy.h"
-#include "../op/gemm_py.h"
+#include "../op/gemm.h"
 #include "../target/utils.h"
 #include "./common/attr.h"
 #include "./common/collector.h"
@@ -472,12 +472,8 @@ private:
       void VisitExpr_(const CallNode *op) override {
         // Check for specific TileLang operations
         static const auto copy_op = Op::Get("tl.tileop.copy");
-        static const auto gemm_py_op = Op::Get("tl.tileop.gemm_py");
         static const auto gemm_op = Op::Get("tl.tileop.gemm");
-        static const auto wgmma_gemm_py_op = Op::Get("tl.tileop.wgmma_gemm_py");
         static const auto wgmma_gemm_op = Op::Get("tl.tileop.wgmma_gemm");
-        static const auto tcgen05_gemm_py_op =
-            Op::Get("tl.tileop.tcgen05_gemm_py");
         static const auto tcgen05_gemm_op = Op::Get("tl.tileop.tcgen05_gemm");
         static const auto reduce_op = Op::Get("tl.tileop.reduce");
         static const auto fill_op = Op::Get("tl.tileop.fill");
@@ -524,10 +520,8 @@ private:
               }
             }
           }
-        } else if (op->op.same_as(gemm_py_op) || op->op.same_as(gemm_op) ||
-                   op->op.same_as(wgmma_gemm_py_op) ||
+        } else if (op->op.same_as(gemm_op) ||
                    op->op.same_as(wgmma_gemm_op) ||
-                   op->op.same_as(tcgen05_gemm_py_op) ||
                    op->op.same_as(tcgen05_gemm_op)) {
           found_tensor = true;
 
@@ -538,9 +532,9 @@ private:
 
           // Determine the final GemmInst using GemmPyNode::getGemmInst
           if (target.defined()) {
-            GemmPy gemm_py(op->args);
+            Gemm gemm(op->args);
             GemmInst inst =
-                gemm_py->getGemmInst(static_cast<int>(block_size), target);
+                gemm->getGemmInst(static_cast<int>(block_size), target);
             ICHECK(!has_gemm_inst || gemm_inst == inst)
                 << "All gemm operations in a task must use the same GemmInst, "
                 << "but got " << GemmInstToString(gemm_inst) << " and "

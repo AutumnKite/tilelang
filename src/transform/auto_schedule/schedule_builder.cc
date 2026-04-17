@@ -59,7 +59,7 @@
 #include <vector>
 
 #include "../../op/builtin.h"
-#include "../../op/gemm_py.h"
+#include "../../op/gemm.h"
 #include "../../op/utils.h"
 #include "../../target/utils.h"
 #include "../common/attr.h"
