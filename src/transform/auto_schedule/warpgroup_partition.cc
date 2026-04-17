@@ -77,8 +77,9 @@ public:
 
   Stmt Rename(Stmt stmt) {
     CollectLetVars(stmt);
-    if (var_remap_.empty()) return stmt;
-    return VisitStmt(std::move(stmt));
+    if (var_remap_.empty())
+      return stmt;
+    return VisitStmt(stmt);
   }
 
 private:

@@ -214,9 +214,7 @@ public:
     return GetRef<Stmt>(op);
   }
 
-  Stmt VisitStmt_(const SeqStmtNode *op) override {
-    return new_inner_;
-  }
+  Stmt VisitStmt_(const SeqStmtNode *op) override { return new_inner_; }
 
 private:
   Stmt new_inner_;
@@ -702,9 +700,10 @@ struct ScheduledKernelResult {
 // Schedule a single kernel body (the logic previously inlined in AutoSchedule).
 // This handles IRStructure building, ScheduleUnit building, barrier analysis,
 // and warpgroup partition for one kernel.
-static ScheduledKernelResult ScheduleSingleKernel(
-    const Stmt &kernel_body, IterVar thread_var, Target target,
-    const WarpSpecializeConfig &config, bool aggressive, bool enable_epi) {
+static ScheduledKernelResult
+ScheduleSingleKernel(const Stmt &kernel_body, IterVar thread_var, Target target,
+                     const WarpSpecializeConfig &config, bool aggressive,
+                     bool enable_epi) {
   ScheduledKernelResult result;
 
   // Calculate thread count for latency estimation
@@ -720,8 +719,7 @@ static ScheduledKernelResult ScheduleSingleKernel(
 
   // Build IRStructure from the body to schedule
   IRStructureBuilder builder;
-  auto ir_structure =
-      builder.Build(kernel_body, latency_thread_count, target);
+  auto ir_structure = builder.Build(kernel_body, latency_thread_count, target);
 
   // Print the built IRStructure with all statements
   ICHECK(ir_structure) << "IRStructure is null (empty body?)";
@@ -761,9 +759,9 @@ static ScheduledKernelResult ScheduleSingleKernel(
   PrimExpr updated_thread_extent = std::accumulate(
       thread_count.begin() + 1, thread_count.end(), thread_count[0]);
   result.updated_thread_extent = updated_thread_extent;
-  Buffer neutral_sync_shared_barrier = makeBarrierBuffer(
-      updated_thread_extent, "neutral_sync_shared_barrier", 1,
-      result.barrier_buffers, result.barrier_map);
+  Buffer neutral_sync_shared_barrier =
+      makeBarrierBuffer(updated_thread_extent, "neutral_sync_shared_barrier", 1,
+                        result.barrier_buffers, result.barrier_map);
   AnalyzeAndInsertBarriers(ir_structure.get(), next_barrier_id,
                            result.barrier_buffers, result.barrier_map,
                            thread_count, loop_info, result.buffer_infos,
@@ -781,11 +779,10 @@ static ScheduledKernelResult ScheduleSingleKernel(
   return result;
 }
 
-
 // Helper: add barrier buffers and barrier_map to the tilelang_root block
-static Stmt AddBarrierBuffersToRoot(
-    const Stmt &body, const std::vector<Buffer> &barrier_buffers,
-    Map<ObjectRef, ObjectRef> &barrier_map) {
+static Stmt AddBarrierBuffersToRoot(const Stmt &body,
+                                    const std::vector<Buffer> &barrier_buffers,
+                                    Map<ObjectRef, ObjectRef> &barrier_map) {
   class TilelangRootAllocBufferAdder : public StmtMutator {
   public:
     explicit TilelangRootAllocBufferAdder(
@@ -805,8 +802,8 @@ static Stmt AddBarrierBuffersToRoot(
         new_annotations.Set("barrier_init", barrier_map_);
         // Create new block with updated alloc_buffers
         return Block(op->iter_vars, op->reads, op->writes, op->name_hint,
-                     op->body, op->init, new_alloc_buffers,
-                     op->match_buffers, new_annotations);
+                     op->body, op->init, new_alloc_buffers, op->match_buffers,
+                     new_annotations);
       }
       return StmtMutator::VisitStmt_(op);
     }
@@ -862,8 +859,7 @@ tvm::transform::Pass AutoSchedule(const bool enable_epi) {
       // Get thread index variable for warpgroup partition
       // First try to get from body_to_schedule, if not found, try from the
       // entire function body
-      IterVar thread_var =
-          ThreadTagChecker::GetThreadVar(body_to_schedule);
+      IterVar thread_var = ThreadTagChecker::GetThreadVar(body_to_schedule);
       if (!thread_var.defined()) {
         thread_var = ThreadTagChecker::GetThreadVar(func->body);
       }
@@ -885,8 +881,8 @@ tvm::transform::Pass AutoSchedule(const bool enable_epi) {
         }
         // Add barrier buffers to tilelang_root block's alloc_buffers
         if (!kr.barrier_buffers.empty()) {
-          final_body = AddBarrierBuffersToRoot(
-              final_body, kr.barrier_buffers, kr.barrier_map);
+          final_body = AddBarrierBuffersToRoot(final_body, kr.barrier_buffers,
+                                               kr.barrier_map);
         }
         // Apply multi-version alloc_buffer rewrite if needed
         if (!kr.buffer_infos.empty()) {
@@ -921,8 +917,8 @@ tvm::transform::Pass AutoSchedule(const bool enable_epi) {
         // Not a schedulable kernel (no tilelang_root), pass through
         if (!combined_stmts.empty()) {
           combined_stmts.push_back(
-              AttrStmt(Integer(0), attr::kAutoScheduleSharedMemoryBoundary,
-                       0, Evaluate(0)));
+              AttrStmt(Integer(0), attr::kAutoScheduleSharedMemoryBoundary, 0,
+                       Evaluate(0)));
         }
         combined_stmts.push_back(kernel_subtree);
         continue;
@@ -931,14 +927,13 @@ tvm::transform::Pass AutoSchedule(const bool enable_epi) {
       Stmt body_to_schedule = extractor.body;
 
       // Get thread index variable for this kernel
-      IterVar thread_var =
-          ThreadTagChecker::GetThreadVar(kernel_subtree);
+      IterVar thread_var = ThreadTagChecker::GetThreadVar(kernel_subtree);
       if (!thread_var.defined()) {
         // Fallback: pass through without scheduling
         if (!combined_stmts.empty()) {
           combined_stmts.push_back(
-              AttrStmt(Integer(0), attr::kAutoScheduleSharedMemoryBoundary,
-                       0, Evaluate(0)));
+              AttrStmt(Integer(0), attr::kAutoScheduleSharedMemoryBoundary, 0,
+                       Evaluate(0)));
         }
         combined_stmts.push_back(kernel_subtree);
         continue;
@@ -977,8 +972,8 @@ tvm::transform::Pass AutoSchedule(const bool enable_epi) {
       // Insert shared memory boundary between kernel segments
       if (!combined_stmts.empty()) {
         combined_stmts.push_back(
-            AttrStmt(Integer(0), attr::kAutoScheduleSharedMemoryBoundary,
-                     0, Evaluate(0)));
+            AttrStmt(Integer(0), attr::kAutoScheduleSharedMemoryBoundary, 0,
+                     Evaluate(0)));
       }
       combined_stmts.push_back(scheduled_subtree);
     }
