@@ -531,6 +531,13 @@ AssignWarpgroupIdsGlobal(IRStructure *root, const WarpSpecializeConfig &config,
   }
 }
 
+/*
+  Recursively schedule root node, after scheduling IRStructure satisfies the
+following properties: 1) For each SequenceNode, its children are reordered by Z3
+scheduler and wrapped in ScheduleUnits. 2) For each ControlNode, its child is a
+SequenceNode with Z3-scheduled children wrapped in ScheduleUnits. 3) For each
+IfNode, its then_child and else_child are recursively scheduled (if exist).
+*/
 void ScheduleUnitBuilder::ScheduleRecursive(
     std::shared_ptr<IRStructure> &node, const std::set<Buffer> &used_buffers) {
   if (!node)
