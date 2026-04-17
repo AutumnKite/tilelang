@@ -311,8 +311,7 @@ public:
     if (const auto *seq = body.as<SeqStmtNode>()) {
       for (const auto &sub_stmt : seq->seq) {
         if (const auto *attr = sub_stmt.as<AttrStmtNode>();
-            attr &&
-            attr->attr_key == attr::kAutoScheduleSharedMemoryBoundary) {
+            attr && attr->attr_key == attr::kAutoScheduleSharedMemoryBoundary) {
           this->VisitStmt_(attr);
         } else {
           StmtExprVisitor::VisitStmt(sub_stmt);
@@ -346,9 +345,8 @@ public:
       VisitWarpSpecializationBody(op->body);
     } else if (op->attr_key == "kAutoScheduleSharedMemoryBoundary") {
       if (in_boundary_scope_) {
-        CloseBoundaryScope(
-            static_cast<const AttrStmtNode *>(
-                linear_seq_[boundary_scope_begin_index_].stmt));
+        CloseBoundaryScope(static_cast<const AttrStmtNode *>(
+            linear_seq_[boundary_scope_begin_index_].stmt));
       }
       OpenBoundaryScope(op);
       VisitBoundaryBody(op->body);
