@@ -584,6 +584,16 @@ AnalyzeAndInsertBarriers(IRStructure *node, int &next_barrier_id,
   }
 }
 
+static TaskNode *GetInnerTask(ScheduleUnit *unit) {
+  std::vector<TaskNodeWithContext> task_contexts;
+  CollectAllTaskNodesWithContext(unit, task_contexts);
+  if (task_contexts.size() == 1 && task_contexts[0].control_node == nullptr) {
+    return task_contexts[0].task;
+  } else {
+    return nullptr;
+  }
+}
+
 static auto
 GetSyncInfos(const std::vector<ScheduleUnit *> &units, int num_wgs,
              const std::unordered_map<Buffer, int, ObjectPtrHash,
@@ -735,14 +745,16 @@ static void InsertSynchronization(
             auto [waiting_unit, waiting_wg_id] = waiting_unit_info;
             // Error: wrong num_mma in prologue and epilogue.
             // Cannot fix now.
-            int real_distance = distance + unit->stage - waiting_unit->stage;
-            int num_mma = wgmma_id[wg_id][waiting_unit] - wgmma_id[wg_id][unit];
-            num_mma += real_distance * wgmma_count[wg_id];
-            if (unit->isInnerTask()) {
-              --num_mma;
-            }
+            //
+            // int real_distance = distance + unit->stage - waiting_unit->stage;
+            // int num_mma = wgmma_id[wg_id][waiting_unit] -
+            // wgmma_id[wg_id][unit]; num_mma += real_distance *
+            // wgmma_count[wg_id]; if (unit->isInnerTask()) {
+            //   --num_mma;
+            // }
+            //
             // Fallback to set num_mma to 0 to avoid error.
-            num_mma = 0;
+            int num_mma = 0;
             Stmt wait_stmt =
                 Evaluate(Call(DataType::Handle(), wait_wgmma(), {num_mma}));
             InsertStatementIntoScheduleUnit(waiting_unit, wait_stmt, true,
@@ -762,8 +774,7 @@ static void InsertSynchronization(
       Buffer barrier_buffer;
       // Handle single special task, such as TCGEN05 or TMA load, that requires
       // a barrier for itself.
-      if (unit->isInnerTask()) {
-        auto task = static_cast<TaskNode *>(unit->child.get());
+      if (auto task = GetInnerTask(unit)) {
         int task_wg_id = task->GetWarpgroupId();
         if (task->is_TCGEN05() && task_wg_id == wg_id) {
           int barrier_id = next_barrier_id++;
@@ -774,6 +785,9 @@ static void InsertSynchronization(
               indexmod(loop_info.CalculateIterationCount(), barrier_versions);
           PrimExpr mbar_expr = BufferLoad(barrier_buffer, {version_index});
           RewriteGemmMbar(task, mbar_expr);
+          // Stmt arrive_stmt =
+          //     makeTcgen05MmaArrive(barrier_buffer, version_index);
+          // InsertStatementIntoScheduleUnit(unit, arrive_stmt, false, wg_id);
         }
         if (task->HasTMALoad() && task_wg_id == wg_id) {
           int barrier_id = next_barrier_id++;
@@ -794,10 +808,12 @@ static void InsertSynchronization(
           return true;
         if (!is_async)
           return false;
-        if (unit->isInnerTask() && waiting_unit->isInnerTask() &&
-            static_cast<TaskNode *>(unit->child.get())->is_TCGEN05() &&
-            static_cast<TaskNode *>(waiting_unit->child.get())->is_TCGEN05()) {
-          return false;
+        if (auto task = GetInnerTask(unit)) {
+          if (auto waiting_task = GetInnerTask(waiting_unit)) {
+            if (task->is_TCGEN05() && waiting_task->is_TCGEN05()) {
+              return false;
+            }
+          }
         }
         return true;
       };
@@ -812,10 +828,9 @@ static void InsertSynchronization(
       if (!need_barrier)
         continue;
       if (!barrier_buffer.defined()) {
-        // Note: the logic here assumes that if there are TCGEN05 tasks, then
-        // all tasks are finished when all TCGEN05 tasks are finished. So we can
-        // use the TCGEN05 barrier for all tasks. If this assumption does not
-        // hold, we may need to implement a more complex logic to synchronize.
+        // Note: the logic here assumes that we DO NOT need to wait for TMA
+        // loads in this unit. If this assumption does not hold, we may need to
+        // implement a more complex logic to synchronize.
         if (unit->HasTCGEN05()) {
           int barrier_id = next_barrier_id++;
           barrier_buffer = makeBarrierBuffer(
@@ -867,36 +882,40 @@ AnalyzeSequenceNodeBarriers(SequenceNode *seq, int &next_barrier_id,
   if (!seq)
     return;
 
-  // Collect all tasks from the sequence
-  std::vector<ScheduleUnit *> tasks;
+  // Collect all units from the sequence
+  std::vector<ScheduleUnit *> units;
   for (auto &child : seq->children) {
-    auto task = static_cast<ScheduleUnit *>(child.get());
-    if (task->child->IsSequence() || task->child->IsControl() ||
-        task->child->IsIf()) {
+    auto unit = static_cast<ScheduleUnit *>(child.get());
+    units.push_back(unit);
+    if (GetInnerTask(unit) != nullptr) {
+      // We will handle these units specially in InsertSynchronization, so we
+      // skip it here.
+      continue;
+    }
+    if (unit->child->IsSequence() || unit->child->IsControl() ||
+        unit->child->IsIf()) {
       // If child is SequenceNode, ControlNode, or IfNode, recursively analyze
       // it
       AnalyzeAndInsertBarriers(
-          task->child.get(), next_barrier_id, barrier_buffers, barrier_map,
+          unit->child.get(), next_barrier_id, barrier_buffers, barrier_map,
           thread_count, loop_info, buffer_infos, neutral_sync_shared_barrier);
     }
-    tasks.push_back(task);
   }
 
-  // Rewrite TMA load tasks to use tma_copy and neutral_sync_shared_barrier
-  for (auto task : tasks) {
-    if (task->isInnerTask() && task->UsesTMACore()) {
-      auto child = static_cast<TaskNode *>(task->child.get());
-      if (child->HasTMALoad() &&
-          child->GetSchedulePhase() == SchedulePhase::kPrologue) {
+  // Rewrite TMA load units to use tma_copy and neutral_sync_shared_barrier
+  for (auto unit : units) {
+    if (auto task = GetInnerTask(unit)) {
+      if (task->HasTMALoad() &&
+          task->GetSchedulePhase() == SchedulePhase::kPrologue) {
         PrimExpr barrier_load = BufferLoad(neutral_sync_shared_barrier, {0});
-        RewriteCopyMbar(child, barrier_load);
+        RewriteCopyMbar(task, barrier_load);
       }
     }
   }
 
-  // Insert synchronization
-  auto sync_infos = GetSyncInfos(tasks, thread_count.size());
-  InsertSynchronization(tasks, sync_infos, next_barrier_id, barrier_buffers,
+  // Analyze dependencies and insert synchronization
+  auto sync_infos = GetSyncInfos(units, thread_count.size());
+  InsertSynchronization(units, sync_infos, next_barrier_id, barrier_buffers,
                         barrier_map, thread_count, loop_info);
 }
 
@@ -916,120 +935,98 @@ AnalyzeControlNodeBarriers(ControlNode *ctrl, int &next_barrier_id,
   if (!for_node)
     return;
 
-  PrimExpr loop_var = for_node->loop_var;
-  PrimExpr loop_start = for_node->min;
-  PrimExpr loop_step = for_node->step.has_value()
-                           ? for_node->step.value()
-                           : IntImm(DataType::Int(32), 1);
-  PrimExpr loop_extent = for_node->extent;
-  bool has_promoted_tasks = ctrl->hasPromote();
-
   // Add this loop to nesting info
   loop_info.AddLoop(for_node);
 
-  // Check if inner loops have constant extents (if any)
-  // This check will be done when calculating parity expression
-
-  // If child is a SequenceNode, we need special handling for
-  // promote/non-promote tasks
-  if (ctrl->child->IsSequence()) {
-    auto seq = static_cast<SequenceNode *>(ctrl->child.get());
-
-    // Collect all tasks from the sequence
-    std::vector<ScheduleUnit *> tasks;
-    for (auto &child : seq->children) {
-      auto task = static_cast<ScheduleUnit *>(child.get());
-      if (task->child->IsSequence() || task->child->IsControl() ||
-          task->child->IsIf()) {
-        // If child is SequenceNode, ControlNode, or IfNode, recursively analyze
-        // it
-        AnalyzeAndInsertBarriers(
-            task->child.get(), next_barrier_id, barrier_buffers, barrier_map,
-            thread_count, loop_info, buffer_infos, neutral_sync_shared_barrier);
-      }
-      tasks.push_back(task);
+  // Collect all units from the sequence
+  ICHECK(ctrl->child->IsSequence());
+  auto seq = static_cast<SequenceNode *>(ctrl->child.get());
+  std::vector<ScheduleUnit *> units;
+  for (auto &child : seq->children) {
+    auto unit = static_cast<ScheduleUnit *>(child.get());
+    units.push_back(unit);
+    if (GetInnerTask(unit) != nullptr) {
+      // We will handle these units specially in InsertSynchronization, so we
+      // skip it here.
+      continue;
     }
-
-    // Process in order: sort by stage
-    // This matches the software pipelining order
-    auto ordered_tasks = tasks;
-    std::stable_sort(
-        ordered_tasks.begin(), ordered_tasks.end(),
-        [](ScheduleUnit *a, ScheduleUnit *b) { return a->stage > b->stage; });
-
-    // Rewrite multi-buffer
-    auto num_stages = 1;
-    auto num_stages_val = ctrl->control.get()->annotations.Get("num_stages");
-    if (num_stages_val.has_value()) {
-      num_stages = num_stages_val.value().cast<IntImm>()->value;
+    if (unit->child->IsSequence() || unit->child->IsControl() ||
+        unit->child->IsIf()) {
+      // If child is SequenceNode, ControlNode, or IfNode, recursively analyze
+      // it
+      AnalyzeAndInsertBarriers(
+          unit->child.get(), next_barrier_id, barrier_buffers, barrier_map,
+          thread_count, loop_info, buffer_infos, neutral_sync_shared_barrier);
     }
-    std::unordered_map<Buffer, Buffer, ObjectPtrHash, ObjectPtrEqual>
-        multi_buffer;
-    std::unordered_map<Buffer, int, ObjectPtrHash, ObjectPtrEqual>
-        buffer_num_versions;
-    if (num_stages != 1) {
-      for (const auto &task : ordered_tasks) {
-        for (const auto &region_access : task->GetReadWriteRegions()) {
-          auto &buffer = region_access.region->buffer;
-          if (!ctrl->multi_buffering_buffers.count(buffer))
+  }
+
+  // Sort units by stage
+  // This matches the software pipelining order
+  auto ordered_units = units;
+  std::stable_sort(
+      ordered_units.begin(), ordered_units.end(),
+      [](ScheduleUnit *a, ScheduleUnit *b) { return a->stage > b->stage; });
+
+  // Detect multi-version buffers and create new buffers for them
+  std::unordered_map<Buffer, Buffer, ObjectPtrHash, ObjectPtrEqual>
+      multi_buffer;
+  std::unordered_map<Buffer, int, ObjectPtrHash, ObjectPtrEqual>
+      buffer_num_versions;
+  for (const auto &unit : ordered_units) {
+    for (const auto &region_access : unit->GetReadWriteRegions()) {
+      auto &buffer = region_access.region->buffer;
+      if (!ctrl->multi_buffering_buffers.count(buffer))
+        continue;
+      for (const auto &other_unit : ordered_units) {
+        if (unit == other_unit)
+          continue;
+        int distance = unit->child->GetStartTime() + unit->child->GetLatency() -
+                       other_unit->child->GetStartTime();
+        if (distance <= 0)
+          continue;
+        distance = (distance - 1) / ctrl->GetIIperIter() + 1;
+        for (const auto &other_region_access :
+             other_unit->GetReadWriteRegions()) {
+          auto &other_buffer = other_region_access.region->buffer;
+          if (!buffer.same_as(other_buffer))
             continue;
-          for (const auto &other_task : ordered_tasks) {
-            if (task == other_task)
-              continue;
-            int distance = task->child->GetStartTime() +
-                           task->child->GetLatency() -
-                           other_task->child->GetStartTime();
-            if (distance <= 0)
-              continue;
-            distance = (distance - 1) / ctrl->GetIIperIter() + 1;
-            for (const auto &other_region_access :
-                 other_task->GetReadWriteRegions()) {
-              auto &other_buffer = other_region_access.region->buffer;
-              if (!buffer.same_as(other_buffer))
-                continue;
-              if (region_access.is_write || other_region_access.is_write) {
-                auto &num_versions = buffer_num_versions[buffer];
-                num_versions = std::max(num_versions, distance);
-              }
-            }
+          if (region_access.is_write || other_region_access.is_write) {
+            auto &num_versions = buffer_num_versions[buffer];
+            num_versions = std::max(num_versions, distance);
           }
         }
       }
-      for (auto &region : ctrl->GetWriteRegions()) {
-        auto &buffer = region.get()->buffer;
-        if (!ctrl->multi_buffering_buffers.count(buffer))
-          continue;
-        if (multi_buffer.find(buffer) != multi_buffer.end())
-          continue;
-        auto it = buffer_num_versions.find(buffer);
-        if (it == buffer_num_versions.end())
-          continue;
-        int num_versions = it->second;
-        if (num_versions == 1)
-          continue;
-        auto new_buffer = RewriteAllocBuffer(buffer, num_versions);
-        multi_buffer[buffer] = new_buffer;
-        buffer_infos.emplace_back(buffer, num_versions, new_buffer);
-      }
-
-      // Rewrite BufferLoad/BufferStore in TaskNode stmts for multi-version
-      // buffers
-      PrimExpr iteration = loop_info.CalculateIterationCount();
-
-      // Recursively rewrite all TaskNode stmts
-      RewriteTaskNodeBuffers(ctrl, multi_buffer, iteration);
     }
-
-    // Insert synchronization
-    auto sync_infos = GetSyncInfos(ordered_tasks, thread_count.size(),
-                                   buffer_num_versions, true);
-    InsertSynchronization(tasks, sync_infos, next_barrier_id, barrier_buffers,
-                          barrier_map, thread_count, loop_info);
-  } else {
-    AnalyzeAndInsertBarriers(
-        ctrl->child.get(), next_barrier_id, barrier_buffers, barrier_map,
-        thread_count, loop_info, buffer_infos, neutral_sync_shared_barrier);
   }
+  for (auto &region : ctrl->GetWriteRegions()) {
+    auto &buffer = region.get()->buffer;
+    if (!ctrl->multi_buffering_buffers.count(buffer))
+      continue;
+    if (multi_buffer.find(buffer) != multi_buffer.end())
+      continue;
+    auto it = buffer_num_versions.find(buffer);
+    if (it == buffer_num_versions.end())
+      continue;
+    int num_versions = it->second;
+    if (num_versions == 1)
+      continue;
+    auto new_buffer = RewriteAllocBuffer(buffer, num_versions);
+    multi_buffer[buffer] = new_buffer;
+    buffer_infos.emplace_back(buffer, num_versions, new_buffer);
+  }
+
+  // Rewrite BufferLoad/BufferStore in TaskNode stmts for multi-version
+  // buffers
+  PrimExpr iteration = loop_info.CalculateIterationCount();
+
+  // Recursively rewrite all TaskNode stmts
+  RewriteTaskNodeBuffers(ctrl, multi_buffer, iteration);
+
+  // Analyze dependencies and insert synchronization
+  auto sync_infos = GetSyncInfos(ordered_units, thread_count.size(),
+                                 buffer_num_versions, true);
+  InsertSynchronization(units, sync_infos, next_barrier_id, barrier_buffers,
+                        barrier_map, thread_count, loop_info);
 
   // Remove this loop from nesting info when exiting
   loop_info.PopLoop();
