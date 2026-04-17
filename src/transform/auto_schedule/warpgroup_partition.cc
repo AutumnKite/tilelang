@@ -71,6 +71,58 @@ namespace tl {
 using namespace tir;
 using ffi::GetRef;
 
+class LetStmtVarRenamer : public StmtExprMutator {
+public:
+  explicit LetStmtVarRenamer(const std::string &suffix) : suffix_(suffix) {}
+
+  Stmt Rename(Stmt stmt) {
+    CollectLetVars(stmt);
+    if (var_remap_.empty()) return stmt;
+    return VisitStmt(std::move(stmt));
+  }
+
+private:
+  void CollectLetVars(const Stmt &stmt) {
+    class Collector : public StmtExprVisitor {
+    public:
+      explicit Collector(Map<Var, Var> &remap, const std::string &suffix)
+          : remap_(remap), suffix_(suffix) {}
+      void VisitStmt_(const LetStmtNode *op) final {
+        remap_.Set(op->var, op->var.copy_with_suffix(suffix_));
+        StmtExprVisitor::VisitStmt_(op);
+      }
+      Map<Var, Var> &remap_;
+      const std::string &suffix_;
+    };
+    Collector c(var_remap_, suffix_);
+    c(stmt);
+  }
+
+  Stmt VisitStmt_(const LetStmtNode *op) final {
+    auto it = var_remap_.find(op->var);
+    Var new_var = it != var_remap_.end() ? (*it).second : op->var;
+    PrimExpr new_value = VisitExpr(op->value);
+    Stmt new_body = VisitStmt(op->body);
+    return LetStmt(new_var, new_value, new_body, op->span);
+  }
+
+  PrimExpr VisitExpr_(const VarNode *op) final {
+    Var var = GetRef<Var>(op);
+    auto it = var_remap_.find(var);
+    if (it != var_remap_.end()) {
+      return (*it).second;
+    }
+    return StmtExprMutator::VisitExpr_(op);
+  }
+
+  std::string suffix_;
+  Map<Var, Var> var_remap_;
+};
+
+static Stmt RenameLetStmtVars(Stmt stmt, const std::string &suffix) {
+  return LetStmtVarRenamer(suffix).Rename(std::move(stmt));
+}
+
 bool IsLetDeclTask(const TaskNode *task) {
   return task->stmts.size() == 1 && task->stmts[0].as<LetStmtNode>() != nullptr;
 }
@@ -725,6 +777,7 @@ Stmt ConvertIRStructureToStmt(IRStructure *structure,
       for_op.CopyOnWrite()->extent =
           max(0, for_op.get()->extent - prologue_extent);
       prologue = Substitute(new_for, sub);
+      prologue = RenameLetStmtVars(prologue, "_prologue");
     }
     Stmt epilogue = Evaluate(0);
     if (enable_epi) {
@@ -742,6 +795,7 @@ Stmt ConvertIRStructureToStmt(IRStructure *structure,
       for_op.CopyOnWrite()->extent =
           max(0, for_op.get()->extent - epilogue_extent);
       epilogue = Substitute(new_for, sub);
+      epilogue = RenameLetStmtVars(epilogue, "_epilogue");
     }
     return SeqStmt({prologue, for_op, epilogue});
   } else if (structure->IsWrapper()) {
