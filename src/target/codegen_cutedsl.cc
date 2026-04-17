@@ -899,10 +899,44 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
            << "[0] + " << c_offset << ", " << desc_val << ", " << scale_out
            << ", " << mask0 << ", " << mask1 << ", " << mask2 << ", " << mask3
            << ")\n";
+  } else if (op->op.same_as(tl::tcgen05_ld())) {
+    ICHECK_EQ(op->args.size(), 6U) << "tcgen05_ld expects 6 arguments";
+    int inst_bits = Downcast<IntImm>(op->args[0])->value;
+    int chunks = Downcast<IntImm>(op->args[1])->value;
+    bool pack16 = Downcast<Bool>(op->args[2])->value;
+    std::string tmem_start_col = PrintExpr_(op->args[3]);
+    std::string col_offset = PrintExpr_(op->args[4]);
+    std::string dst_ptr = PrintExpr_(op->args[5]);
+    PrintIndent();
+    stream << "tl.tcgen05_ld_32dp" << inst_bits << "bNx(" << chunks << ", "
+           << (pack16 ? "True" : "False") << ", " << tmem_start_col << ", "
+           << col_offset << ", " << dst_ptr << ")\n";
+  } else if (op->op.same_as(tl::tcgen05_st())) {
+    ICHECK_EQ(op->args.size(), 6U) << "tcgen05_st expects 6 arguments";
+    int inst_bits = Downcast<IntImm>(op->args[0])->value;
+    int chunks = Downcast<IntImm>(op->args[1])->value;
+    bool unpack16 = Downcast<Bool>(op->args[2])->value;
+    std::string tmem_start_col = PrintExpr_(op->args[3]);
+    std::string col_offset = PrintExpr_(op->args[4]);
+    std::string src_ptr = PrintExpr_(op->args[5]);
+    PrintIndent();
+    stream << "tl.tcgen05_st_32dp" << inst_bits << "bNx(" << chunks << ", "
+           << (unpack16 ? "True" : "False") << ", " << tmem_start_col << ", "
+           << col_offset << ", " << src_ptr << ")\n";
   } else if (op->op.same_as(tl::tcgen05_mma_arrive())) {
     ICHECK_EQ(op->args.size(), 1U) << "tcgen05_mma_arrive expects 1 argument";
     PrintIndent();
     stream << "tl.tcgen05_mma_arrive(" << PrintExpr_(op->args[0]) << ")\n";
+  } else if (op->op.same_as(tl::tcgen05_before_thread_sync())) {
+    ICHECK_EQ(op->args.size(), 0U)
+        << "tcgen05_before_thread_sync expects no arguments";
+    PrintIndent();
+    stream << "tl.tcgen05_before_thread_sync()\n";
+  } else if (op->op.same_as(tl::tcgen05_after_thread_sync())) {
+    ICHECK_EQ(op->args.size(), 0U)
+        << "tcgen05_after_thread_sync expects no arguments";
+    PrintIndent();
+    stream << "tl.tcgen05_after_thread_sync()\n";
   } else if (op->op.same_as(builtin::ptx_ldmatrix())) {
     // arg 0: whether the matrix is loaded in column major format or not.
     // arg 1: number of matrices to load.
@@ -1679,25 +1713,6 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const AttrStmtNode *op) {
       }
     }
     VisitStmt(op->body);
-  } else if (op->attr_key == tir::attr::async_commit_queue_scope) {
-    const IntImmNode *queue_id = op->value.as<IntImmNode>();
-    ICHECK(queue_id && queue_id->value == 0)
-        << "For CUDA, the index of an async queue must be 0.";
-    VisitStmt(op->body);
-    auto commit_group = Call(DataType::Void(), builtin::ptx_commit_group(), {});
-    VisitExpr(commit_group, stream);
-  } else if (op->attr_key == tir::attr::async_wait_queue_scope) {
-    auto wait_attrs = GetAsyncWaitAttributes(op);
-    auto queue_id = wait_attrs.first.as<IntImmNode>();
-    ICHECK(queue_id && queue_id->value == 0)
-        << "For CUDA, the index of an async queue must be 0.";
-    auto wait_cnt = wait_attrs.second;
-    auto wait_group =
-        Call(DataType::Void(), builtin::ptx_wait_group(), {wait_cnt});
-    VisitExpr(wait_group, stream);
-    auto inner = op->body.as<AttrStmtNode>();
-    ICHECK(inner);
-    VisitStmt(inner->body);
   } else if (op->attr_key == "threadblock_swizzle_pattern") {
     this->PrintIndent();
     std::string func_name;
