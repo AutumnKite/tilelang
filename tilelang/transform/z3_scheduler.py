@@ -83,10 +83,8 @@ def z3_schedule_python(
     n = len(latencies)
 
     # For small number of tasks, return trivial schedule
-    if n <= 1:
-        if n == 1:
-            return [0], [0]
-        return [], []
+    if n < 1:
+        raise RuntimeError("Z3 scheduling failed: n too small")
 
     if verbose:
         print(f"[Python Z3] Starting scheduling for {n} tasks")
@@ -263,7 +261,7 @@ def z3_schedule_loop_python(
     n = len(latencies)
 
     # For small number of tasks, return trivial schedule
-    if n <= 1:
+    if n < 1:
         raise RuntimeError("Z3 loop scheduling failed: n too small")
 
     if verbose:
