@@ -90,7 +90,6 @@ void GatherTaskNodes(const std::vector<std::shared_ptr<IRStructure>> &nodes,
     } else if (node->IsControl()) {
       task_nodes.emplace_back(node);
     } else if (node->IsIf()) {
-      // IfNode is atomic — add as whole unit, don't decompose
       task_nodes.emplace_back(node);
     } else {
       LOG(FATAL) << "Unknown node type in GatherTaskNodes";
@@ -610,6 +609,12 @@ void ScheduleUnitBuilder::ScheduleRecursive(
     }
 
     seq->children = ChildrenScheduleHelper(origin_children);
+    int64_t overall_latency = 0;
+    for (const auto &child : seq->children) {
+      overall_latency += child->GetLatency();
+    }
+    seq->SetLatency(overall_latency);
+    seq->SetII(overall_latency);
     return;
   } else if (node->IsControl()) {
     auto ctrl = static_cast<ControlNode *>(node.get());
@@ -655,6 +660,11 @@ void ScheduleUnitBuilder::ScheduleRecursive(
         Z3SchedulePythonLoop(ctrl, used_buffers);
       } else {
         ScheduleRecursive(ctrl->child, used_buffers);
+        auto old_child = ctrl->child;
+        auto seq_node = std::make_shared<SequenceNode>();
+        seq_node->children = {old_child};
+        ctrl->child = seq_node;
+        Z3SchedulePythonLoop(ctrl, used_buffers);
       }
     }
     return;
@@ -678,10 +688,15 @@ void ScheduleUnitBuilder::ScheduleRecursive(
     }
     auto seq_node = std::make_shared<SequenceNode>();
     seq_node->children = ChildrenScheduleHelper(origin_children);
+    int64_t overall_latency = 0;
+    for (const auto &child : seq_node->children) {
+      overall_latency += child->GetLatency();
+    }
+    seq_node->SetLatency(overall_latency);
+    seq_node->SetII(overall_latency);
     node = seq_node;
     return;
   } else if (node->IsIf()) {
-    // IfNode: recursively schedule both branches internally
     auto if_node = static_cast<IfNode *>(node.get());
     if (if_node->then_child) {
       ScheduleRecursive(if_node->then_child, used_buffers);
@@ -689,6 +704,9 @@ void ScheduleUnitBuilder::ScheduleRecursive(
     if (if_node->else_child) {
       ScheduleRecursive(if_node->else_child, used_buffers);
     }
+    if_node->SetLatency(std::max(if_node->then_child ? if_node->then_child->GetLatency() : 0,
+                                if_node->else_child ? if_node->else_child->GetLatency() : 0));
+    if_node->SetII(if_node->GetLatency());
     return;
   }
 
