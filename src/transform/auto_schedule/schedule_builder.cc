@@ -704,9 +704,12 @@ void ScheduleUnitBuilder::ScheduleRecursive(
     if (if_node->else_child) {
       ScheduleRecursive(if_node->else_child, used_buffers);
     }
-    if_node->SetLatency(std::max(if_node->then_child ? if_node->then_child->GetLatency() : 0,
-                                if_node->else_child ? if_node->else_child->GetLatency() : 0));
-    if_node->SetII(if_node->GetLatency());
+    if_node->SetLatency(
+        std::max(if_node->then_child ? if_node->then_child->GetLatency() : 0,
+                 if_node->else_child ? if_node->else_child->GetLatency() : 0));
+    if_node->SetII(
+        std::max(if_node->then_child ? if_node->then_child->GetII() : 0,
+                 if_node->else_child ? if_node->else_child->GetII() : 0));
     return;
   }
 
