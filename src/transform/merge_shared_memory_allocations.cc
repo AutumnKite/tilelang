@@ -272,74 +272,63 @@ public:
     linear_seq_[begin_index].scope_pair_offset = end_index - begin_index;
   }
 
-  // Visit kAutoScheduleSharedMemoryBoundary bounded scopes.
-  //
-  // After ReNestLetStmts, the next boundary marker may be nested inside
-  // LetStmt / non-boundary AttrStmt chains rather than sitting as a direct
-  // sibling in a SeqStmt.  We therefore recursively peel through such
-  // wrappers to find the innermost SeqStmt and locate the boundary there.
-  void VisitBoundedNewScopes(const AttrStmtNode *op) {
+  // Open a new boundary scope for a kAutoScheduleSharedMemoryBoundary marker.
+  // Pushes a scope sentinel onto linear_seq_ and records the begin index.
+  void OpenBoundaryScope(const AttrStmtNode *op) {
     scope_.push_back(StmtEntry());
     StmtEntry e;
     e.stmt = op;
     UpdateStmtAttr(op, scope_level_);
-    int64_t begin_index = static_cast<int64_t>(linear_seq_.size());
-    // before scope.
+    boundary_scope_begin_index_ = static_cast<int64_t>(linear_seq_.size());
     linear_seq_.push_back(e);
-    bool has_tail_stmt = false;
-    const AttrStmtNode *tail_stmt = nullptr;
+    in_boundary_scope_ = true;
+  }
 
-    // Recursively visit the body, peeling LetStmt / non-boundary AttrStmt
-    // wrappers.  When a SeqStmt is reached, scan its children for the next
-    // boundary marker.  Everything that is not the boundary is visited
-    // normally so that buffer accesses are recorded in this scope.
-    std::function<void(const Stmt &)> VisitBodyFindBoundary =
-        [&](const Stmt &body) {
-          if (const auto *seq = body.as<SeqStmtNode>()) {
-            for (const auto &sub_stmt : seq->seq) {
-              if (const auto *attr = sub_stmt.as<AttrStmtNode>();
-                  attr &&
-                  attr->attr_key == attr::kAutoScheduleSharedMemoryBoundary) {
-                has_tail_stmt = true;
-                tail_stmt = attr;
-              } else {
-                StmtExprVisitor::VisitStmt(sub_stmt);
-              }
-            }
-          } else if (const auto *let = body.as<LetStmtNode>()) {
-            // Record the let-binding variable/value, then recurse into body.
-            StmtExprVisitor::VisitExpr(let->value);
-            VisitBodyFindBoundary(let->body);
-          } else if (const auto *attr = body.as<AttrStmtNode>()) {
-            if (attr->attr_key == attr::kAutoScheduleSharedMemoryBoundary) {
-              // The body itself is a boundary — treat it as the tail.
-              has_tail_stmt = true;
-              tail_stmt = attr;
-            } else {
-              // Non-boundary AttrStmt wrapper — visit value and recurse.
-              StmtExprVisitor::VisitExpr(attr->value);
-              VisitBodyFindBoundary(attr->body);
-            }
-          } else {
-            // Any other statement — visit normally.
-            StmtExprVisitor::VisitStmt(body);
-          }
-        };
-
-    VisitBodyFindBoundary(op->body);
-
-    // after scope.
+  // Close the current boundary scope.  Pops the scope, writes the end
+  // sentinel and patches up the scope_pair_offset links.
+  void CloseBoundaryScope(const AttrStmtNode *op) {
+    ICHECK(in_boundary_scope_);
+    StmtEntry e;
+    e.stmt = op;
+    UpdateStmtAttr(op, scope_level_);
     e.touched = std::move(scope_.back().touched);
     scope_.pop_back();
     int64_t end_index = static_cast<int64_t>(linear_seq_.size());
-    ICHECK_GT(end_index, begin_index);
-    e.scope_pair_offset = begin_index - end_index;
+    ICHECK_GT(end_index, boundary_scope_begin_index_);
+    e.scope_pair_offset = boundary_scope_begin_index_ - end_index;
     linear_seq_.push_back(e);
     ICHECK_NE(end_index, 0U);
-    linear_seq_[begin_index].scope_pair_offset = end_index - begin_index;
-    // visit tail statement (the next boundary scope).
-    if (has_tail_stmt) {
-      StmtExprVisitor::VisitStmt_(tail_stmt);
+    linear_seq_[boundary_scope_begin_index_].scope_pair_offset =
+        end_index - boundary_scope_begin_index_;
+    in_boundary_scope_ = false;
+  }
+
+  // Recursively visit the body of a boundary AttrStmt, peeling through
+  // LetStmt / non-boundary AttrStmt / SeqStmt wrappers.  When a nested
+  // boundary marker is encountered it is dispatched back through
+  // VisitStmt_ which will close the current scope and open a new one.
+  void VisitBoundaryBody(const Stmt &body) {
+    if (const auto *seq = body.as<SeqStmtNode>()) {
+      for (const auto &sub_stmt : seq->seq) {
+        if (const auto *attr = sub_stmt.as<AttrStmtNode>();
+            attr &&
+            attr->attr_key == attr::kAutoScheduleSharedMemoryBoundary) {
+          this->VisitStmt_(attr);
+        } else {
+          StmtExprVisitor::VisitStmt(sub_stmt);
+        }
+      }
+    } else if (const auto *let = body.as<LetStmtNode>()) {
+      StmtExprVisitor::VisitExpr(let->value);
+      VisitBoundaryBody(let->body);
+    } else if (const auto *attr = body.as<AttrStmtNode>()) {
+      if (attr->attr_key == attr::kAutoScheduleSharedMemoryBoundary) {
+        this->VisitStmt_(attr);
+      } else {
+        VisitBoundaryBody(attr->body);
+      }
+    } else {
+      StmtExprVisitor::VisitStmt(body);
     }
   }
 
@@ -356,7 +345,16 @@ public:
     } else if (op->attr_key == "kWarpSpecializationScope") {
       VisitWarpSpecializationBody(op->body);
     } else if (op->attr_key == "kAutoScheduleSharedMemoryBoundary") {
-      VisitBoundedNewScopes(op);
+      if (in_boundary_scope_) {
+        CloseBoundaryScope(
+            static_cast<const AttrStmtNode *>(
+                linear_seq_[boundary_scope_begin_index_].stmt));
+      }
+      OpenBoundaryScope(op);
+      VisitBoundaryBody(op->body);
+      if (in_boundary_scope_) {
+        CloseBoundaryScope(op);
+      }
     } else {
       StmtExprVisitor::VisitStmt_(op);
     }
@@ -437,6 +435,10 @@ private:
   bool verbose_{false};
   // Whether already in thread env.
   bool in_thread_env_{false};
+  // Whether we are currently inside a boundary scope.
+  bool in_boundary_scope_{false};
+  // The begin index in linear_seq_ of the current boundary scope.
+  int64_t boundary_scope_begin_index_{0};
   // The scope stack.
   std::vector<StmtEntry> scope_;
   // The size of the scope.
