@@ -241,6 +241,12 @@ void CollectPrefixTasks(IRStructure *root,
         break;
       }
     }
+    for (auto *pre : prefix_tasks) {
+      if (HasDependency(task, pre)) {
+        has_dep = true;
+        break;
+      }
+    }
     if (has_dep) {
       rejected.push_back(task);
     } else {

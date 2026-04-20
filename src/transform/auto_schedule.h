@@ -107,14 +107,6 @@ inline int64_t GetSharedMemoryLimit(Target target) {
   }
 }
 
-// Global warpgroup id assignment - should be called from the top level
-// Tasks that use the same register region must have the same warpgroup id
-// Goal: balance weighted latency between two warpgroups (0 and 1)
-// Weighted latency = latency * tripcount (tripcount = 100 for non-constant loop
-// extent)
-bool AssignWarpgroupIdsGlobal(IRStructure *root,
-                              bool enable_warp_partition = false);
-
 // Function to rewrite alloc_buffers for multi-version support
 Stmt RewriteAllocBuffers(
     const Stmt &stmt, const std::vector<MultiVersionBufferInfo> &buffer_infos);
