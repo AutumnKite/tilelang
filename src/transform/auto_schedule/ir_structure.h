@@ -567,20 +567,42 @@ public:
     return child ? child->HasTCGEN05() : false;
   }
 
-  // Memory access regions (aggregate from child)
+  // Memory access regions (aggregate from child & task)
   std::vector<BufferRegion> GetReadRegions() const override {
-    return child ? child->GetReadRegions() : std::vector<BufferRegion>{};
+    std::vector<BufferRegion> regions =
+        child ? child->GetReadRegions() : std::vector<BufferRegion>{};
+    if (task) {
+      auto task_regions = task->GetReadRegions();
+      regions.insert(regions.end(), task_regions.begin(), task_regions.end());
+    }
+    return regions;
   }
   std::vector<BufferRegion> GetWriteRegions() const override {
-    return child ? child->GetWriteRegions() : std::vector<BufferRegion>{};
+    std::vector<BufferRegion> regions =
+        child ? child->GetWriteRegions() : std::vector<BufferRegion>{};
+    if (task) {
+      auto task_regions = task->GetWriteRegions();
+      regions.insert(regions.end(), task_regions.begin(), task_regions.end());
+    }
+    return regions;
   }
 
-  // Variable access (aggregate from child)
+  // Variable access (aggregate from child & task)
   std::vector<Var> GetReadVars() const override {
-    return child ? child->GetReadVars() : std::vector<Var>{};
+    std::vector<Var> vars = child ? child->GetReadVars() : std::vector<Var>{};
+    if (task) {
+      auto task_vars = task->GetReadVars();
+      vars.insert(vars.end(), task_vars.begin(), task_vars.end());
+    }
+    return vars;
   }
   std::vector<Var> GetWriteVars() const override {
-    return child ? child->GetWriteVars() : std::vector<Var>{};
+    std::vector<Var> vars = child ? child->GetWriteVars() : std::vector<Var>{};
+    if (task) {
+      auto task_vars = task->GetWriteVars();
+      vars.insert(vars.end(), task_vars.begin(), task_vars.end());
+    }
+    return vars;
   }
 
   void SubstituteVar(const Var &old_var, const Var &new_var) override {
