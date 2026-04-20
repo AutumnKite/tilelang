@@ -601,8 +601,9 @@ GetSyncInfos(const std::vector<ScheduleUnit *> &units, int num_wgs,
              bool is_loop = false) {
   std::set<Buffer> buffers;
   for (auto *unit : units) {
-    for (const auto &region_access : unit->GetReadWriteRegions()) {
-      buffers.insert(region_access.region->buffer);
+    for (const auto &buffer_access :
+         unit->GetBufferAccessInfo(num_wgs, SchedulePhase::kBody)) {
+      buffers.insert(buffer_access.buffer);
     }
   }
   std::map<std::pair<ScheduleUnit *, int>,
@@ -620,12 +621,11 @@ GetSyncInfos(const std::vector<ScheduleUnit *> &units, int num_wgs,
     std::vector<bool> waited_write_wgs(num_wgs, false);
     for (int iter = 0; iter < (is_loop ? 2 : 1); ++iter) {
       for (ScheduleUnit *unit : units) {
-        for (const auto &region_access : unit->GetReadWriteRegions()) {
-          int wg_id = region_access.warpgroup_id;
-          if (region_access.schedule_phase != SchedulePhase::kBody)
-            continue;
+        for (const auto &buffer_access :
+             unit->GetBufferAccessInfo(num_wgs, SchedulePhase::kBody)) {
+          int wg_id = buffer_access.warpgroup_id;
           ICHECK(0 <= wg_id && wg_id < num_wgs);
-          if (region_access.region->buffer != buffer)
+          if (buffer_access.buffer != buffer)
             continue;
           auto add_sync = [&](ScheduleUnit *wait_unit, int wait_wg_id) {
             int distance = iter ? num_versions : 0;
@@ -639,7 +639,7 @@ GetSyncInfos(const std::vector<ScheduleUnit *> &units, int num_wgs,
               it->second = std::min(it->second, distance);
             }
           };
-          if (!region_access.is_write) {
+          if (!buffer_access.is_write) {
             if (last_write_unit == nullptr)
               continue;
             if (waited_write_wgs[wg_id])
@@ -654,13 +654,12 @@ GetSyncInfos(const std::vector<ScheduleUnit *> &units, int num_wgs,
           }
         }
         if (iter == 0) {
-          for (const auto &region_access : unit->GetReadWriteRegions()) {
-            int wg_id = region_access.warpgroup_id;
-            if (region_access.schedule_phase != SchedulePhase::kBody)
+          for (const auto &buffer_access :
+               unit->GetBufferAccessInfo(num_wgs, SchedulePhase::kBody)) {
+            int wg_id = buffer_access.warpgroup_id;
+            if (buffer_access.buffer != buffer)
               continue;
-            if (region_access.region->buffer != buffer)
-              continue;
-            if (!region_access.is_write) {
+            if (!buffer_access.is_write) {
               waited_write_wgs[wg_id] = true;
             } else {
               for (int wg_id = 0; wg_id < num_wgs; ++wg_id) {
@@ -668,13 +667,12 @@ GetSyncInfos(const std::vector<ScheduleUnit *> &units, int num_wgs,
               }
             }
           }
-          for (const auto &region_access : unit->GetReadWriteRegions()) {
-            int wg_id = region_access.warpgroup_id;
-            if (region_access.schedule_phase != SchedulePhase::kBody)
+          for (const auto &buffer_access :
+               unit->GetBufferAccessInfo(num_wgs, SchedulePhase::kBody)) {
+            int wg_id = buffer_access.warpgroup_id;
+            if (buffer_access.buffer != buffer)
               continue;
-            if (region_access.region->buffer != buffer)
-              continue;
-            if (!region_access.is_write) {
+            if (!buffer_access.is_write) {
               last_read_unit[wg_id] = unit;
             } else {
               last_write_unit = unit;
@@ -972,9 +970,11 @@ AnalyzeControlNodeBarriers(ControlNode *ctrl, int &next_barrier_id,
       multi_buffer;
   std::unordered_map<Buffer, int, ObjectPtrHash, ObjectPtrEqual>
       buffer_num_versions;
+  int num_wgs = thread_count.size();
   for (const auto &unit : ordered_units) {
-    for (const auto &region_access : unit->GetReadWriteRegions()) {
-      auto &buffer = region_access.region->buffer;
+    for (const auto &buffer_access :
+         unit->GetBufferAccessInfo(num_wgs, SchedulePhase::kBody)) {
+      auto &buffer = buffer_access.buffer;
       if (!ctrl->multi_buffering_buffers.count(buffer))
         continue;
       for (const auto &other_unit : ordered_units) {
@@ -985,12 +985,12 @@ AnalyzeControlNodeBarriers(ControlNode *ctrl, int &next_barrier_id,
         if (distance <= 0)
           continue;
         distance = (distance - 1) / ctrl->GetIIperIter() + 1;
-        for (const auto &other_region_access :
-             other_unit->GetReadWriteRegions()) {
-          auto &other_buffer = other_region_access.region->buffer;
+        for (const auto &other_buffer_access :
+             other_unit->GetBufferAccessInfo(num_wgs, SchedulePhase::kBody)) {
+          auto &other_buffer = other_buffer_access.buffer;
           if (!buffer.same_as(other_buffer))
             continue;
-          if (region_access.is_write || other_region_access.is_write) {
+          if (buffer_access.is_write || other_buffer_access.is_write) {
             auto &num_versions = buffer_num_versions[buffer];
             num_versions = std::max(num_versions, distance);
           }

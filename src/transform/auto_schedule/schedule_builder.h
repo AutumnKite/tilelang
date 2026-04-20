@@ -367,14 +367,16 @@ public:
     std::map<Buffer, int64_t> buffer_to_num_versions;
     std::set<Buffer> multi_buffering_buffers;
     int64_t memory_limit = shared_memory_limit_;
-    for (const auto &region_access : ctrl->GetReadWriteRegions()) {
-      const auto &buffer = region_access.region->buffer;
+    for (const auto &buffer_access : ctrl->GetBufferAccessInfo()) {
+      const auto &buffer = buffer_access.buffer;
       if (!IsSharedBuffer(buffer)) {
         continue; // Only consider shared buffers for multi-buffer
       }
       if (buffer_to_num_versions.count(buffer)) {
         continue;
       }
+      // If the buffer is used outside the loop or is read before being written,
+      // we cannot multi-buffer it
       if (used_buffers.count(buffer) || !check_buffer_write_first(buffer)) {
         buffer_to_num_versions[buffer] = 1;
         memory_limit -= GetBufferSize(buffer);

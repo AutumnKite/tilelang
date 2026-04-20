@@ -38,17 +38,34 @@ enum class SchedulePhase : uint8_t {
   kEpilogue = 2, // Runs on ALL threads AFTER warpgroup-specific code
 };
 
-// Structure to store region access information with warpgroup id
-struct RegionAccessInfo {
-  BufferRegion region;
+// Structure to store buffer access information
+struct BufferAccessInfo {
+  Buffer buffer;
   bool is_write;    // true for write, false for read
   int warpgroup_id; // warpgroup id of the innermost TaskNode
   SchedulePhase schedule_phase{SchedulePhase::kBody}; // scheduling phase
 
-  RegionAccessInfo(BufferRegion region, bool is_write, int warpgroup_id,
+  BufferAccessInfo(Buffer buffer, bool is_write, int warpgroup_id,
                    SchedulePhase phase = SchedulePhase::kBody)
-      : region(region), is_write(is_write), warpgroup_id(warpgroup_id),
+      : buffer(buffer), is_write(is_write), warpgroup_id(warpgroup_id),
         schedule_phase(phase) {}
+
+  // Define operator< for set
+  bool operator<(const BufferAccessInfo &other) const {
+    if (buffer != other.buffer) {
+      return buffer.get() < other.buffer.get();
+    }
+    if (is_write != other.is_write) {
+      return is_write < other.is_write;
+    }
+    if (warpgroup_id != other.warpgroup_id) {
+      return warpgroup_id < other.warpgroup_id;
+    }
+    if (schedule_phase != other.schedule_phase) {
+      return schedule_phase < other.schedule_phase;
+    }
+    return false;
+  }
 };
 
 // Helper function to compare if two regions are equal
@@ -116,16 +133,17 @@ public:
   virtual void SetLatency(int64_t latency) = 0;
   virtual void SetII(int64_t ii) = 0;
 
-  // Recursive region collection method
-  virtual void CollectRegions(
-      std::vector<RegionAccessInfo> &result,
-      std::set<std::pair<Buffer, std::pair<int, int>>> &visited) const = 0;
+  // Recursive buffer collection method
+  virtual void
+  CollectBufferAccessInfo(int num_wgs, SchedulePhase phase,
+                          std::set<BufferAccessInfo> &result) const = 0;
 
-  std::vector<RegionAccessInfo> GetReadWriteRegions() const {
-    std::vector<RegionAccessInfo> result;
-    std::set<std::pair<Buffer, std::pair<int, int>>> visited;
-    CollectRegions(result, visited);
-    return result;
+  std::vector<BufferAccessInfo>
+  GetBufferAccessInfo(int num_wgs = 1,
+                      SchedulePhase phase = SchedulePhase::kBody) const {
+    std::set<BufferAccessInfo> result;
+    CollectBufferAccessInfo(num_wgs, phase, result);
+    return std::vector<BufferAccessInfo>(result.begin(), result.end());
   }
 
   // Substitute a variable throughout this IR node
@@ -333,9 +351,9 @@ public:
   void AddReadVar(const Var &var) { read_vars_.push_back(var); }
   void AddWriteVar(const Var &var) { write_vars_.push_back(var); }
 
-  void CollectRegions(
-      std::vector<RegionAccessInfo> &result,
-      std::set<std::pair<Buffer, std::pair<int, int>>> &visited) const override;
+  void
+  CollectBufferAccessInfo(int num_wgs, SchedulePhase phase,
+                          std::set<BufferAccessInfo> &result) const override;
 
   bool containWarpgroupId(int id) const override {
     return ContainsLoopBreak() || warpgroup_id_ == id;
@@ -489,9 +507,9 @@ public:
   void SetLatency(int64_t latency) override { latency_ = latency; }
   void SetII(int64_t ii) override { ii_ = ii; }
 
-  void CollectRegions(
-      std::vector<RegionAccessInfo> &result,
-      std::set<std::pair<Buffer, std::pair<int, int>>> &visited) const override;
+  void
+  CollectBufferAccessInfo(int num_wgs, SchedulePhase phase,
+                          std::set<BufferAccessInfo> &result) const override;
 
   bool hasPromote() const { return has_promote_; }
 
@@ -605,9 +623,9 @@ public:
   void SetLatency(int64_t latency) override { latency_ = latency; }
   void SetII(int64_t ii) override { ii_ = ii; }
 
-  void CollectRegions(
-      std::vector<RegionAccessInfo> &result,
-      std::set<std::pair<Buffer, std::pair<int, int>>> &visited) const override;
+  void
+  CollectBufferAccessInfo(int num_wgs, SchedulePhase phase,
+                          std::set<BufferAccessInfo> &result) const override;
 
   // Clone method
   std::shared_ptr<IRStructure> Clone() const override;
@@ -779,9 +797,9 @@ public:
   void SetLatency(int64_t latency) override { latency_ = latency; }
   void SetII(int64_t ii) override { ii_ = ii; }
 
-  void CollectRegions(
-      std::vector<RegionAccessInfo> &result,
-      std::set<std::pair<Buffer, std::pair<int, int>>> &visited) const override;
+  void
+  CollectBufferAccessInfo(int num_wgs, SchedulePhase phase,
+                          std::set<BufferAccessInfo> &result) const override;
 
   // Clone method
   std::shared_ptr<IRStructure> Clone() const override;
@@ -887,9 +905,9 @@ public:
   void SetLatency(int64_t latency) override { latency_ = latency; }
   void SetII(int64_t ii) override { ii_ = ii; }
 
-  void CollectRegions(
-      std::vector<RegionAccessInfo> &result,
-      std::set<std::pair<Buffer, std::pair<int, int>>> &visited) const override;
+  void
+  CollectBufferAccessInfo(int num_wgs, SchedulePhase phase,
+                          std::set<BufferAccessInfo> &result) const override;
 
   int GetStage() const { return stage; }
   bool isInnerTask() const { return child->IsTask(); }
@@ -965,9 +983,9 @@ public:
   void SetLatency(int64_t latency) override;
   void SetII(int64_t ii) override;
 
-  void CollectRegions(
-      std::vector<RegionAccessInfo> &result,
-      std::set<std::pair<Buffer, std::pair<int, int>>> &visited) const override;
+  void
+  CollectBufferAccessInfo(int num_wgs, SchedulePhase phase,
+                          std::set<BufferAccessInfo> &result) const override;
 
   // Clone method
   std::shared_ptr<IRStructure> Clone() const override;

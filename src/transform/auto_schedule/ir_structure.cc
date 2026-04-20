@@ -267,25 +267,31 @@ std::shared_ptr<IRStructure> TaskNode::Clone() const {
   return new_task;
 }
 
-void TaskNode::CollectRegions(
-    std::vector<RegionAccessInfo> &result,
-    std::set<std::pair<Buffer, std::pair<int, int>>> &visited) const {
+void TaskNode::CollectBufferAccessInfo(
+    int num_wgs, SchedulePhase phase,
+    std::set<BufferAccessInfo> &result) const {
   int wg_id = GetWarpgroupId();
-  SchedulePhase phase = GetSchedulePhase();
-  // Collect write regions
+  if (GetSchedulePhase() != phase) {
+    return;
+  }
+  // Collect write buffers
   for (const auto &region : GetWriteRegions()) {
-    auto key = std::make_pair(region->buffer, std::make_pair(true, wg_id));
-    if (visited.find(key) == visited.end()) {
-      visited.insert(key);
-      result.emplace_back(region, true, wg_id, phase);
+    if (wg_id != -1) {
+      result.emplace(region->buffer, true, wg_id, phase);
+    } else {
+      for (int i = 0; i < num_wgs; ++i) {
+        result.emplace(region->buffer, true, i, phase);
+      }
     }
   }
-  // Collect read regions
+  // Collect read buffers
   for (const auto &region : GetReadRegions()) {
-    auto key = std::make_pair(region->buffer, std::make_pair(false, wg_id));
-    if (visited.find(key) == visited.end()) {
-      visited.insert(key);
-      result.emplace_back(region, false, wg_id, phase);
+    if (wg_id != -1) {
+      result.emplace(region->buffer, false, wg_id, phase);
+    } else {
+      for (int i = 0; i < num_wgs; ++i) {
+        result.emplace(region->buffer, false, i, phase);
+      }
     }
   }
 }
@@ -385,51 +391,50 @@ std::shared_ptr<IRStructure> IfNode::Clone() const {
   return new_if;
 }
 
-void ControlNode::CollectRegions(
-    std::vector<RegionAccessInfo> &result,
-    std::set<std::pair<Buffer, std::pair<int, int>>> &visited) const {
+void ControlNode::CollectBufferAccessInfo(
+    int num_wgs, SchedulePhase phase,
+    std::set<BufferAccessInfo> &result) const {
   if (child) {
-    child->CollectRegions(result, visited);
+    child->CollectBufferAccessInfo(num_wgs, phase, result);
   }
 }
 
-void WrapperNode::CollectRegions(
-    std::vector<RegionAccessInfo> &result,
-    std::set<std::pair<Buffer, std::pair<int, int>>> &visited) const {
+void WrapperNode::CollectBufferAccessInfo(
+    int num_wgs, SchedulePhase phase,
+    std::set<BufferAccessInfo> &result) const {
   if (child) {
-    child->CollectRegions(result, visited);
+    child->CollectBufferAccessInfo(num_wgs, phase, result);
   }
 }
 
-void ScheduleUnit::CollectRegions(
-    std::vector<RegionAccessInfo> &result,
-    std::set<std::pair<Buffer, std::pair<int, int>>> &visited) const {
+void ScheduleUnit::CollectBufferAccessInfo(
+    int num_wgs, SchedulePhase phase,
+    std::set<BufferAccessInfo> &result) const {
   if (child) {
-    child->CollectRegions(result, visited);
+    child->CollectBufferAccessInfo(num_wgs, phase, result);
   }
 }
 
-void SequenceNode::CollectRegions(
-    std::vector<RegionAccessInfo> &result,
-    std::set<std::pair<Buffer, std::pair<int, int>>> &visited) const {
+void SequenceNode::CollectBufferAccessInfo(
+    int num_wgs, SchedulePhase phase,
+    std::set<BufferAccessInfo> &result) const {
   for (const auto &child : children) {
     if (child) {
-      child->CollectRegions(result, visited);
+      child->CollectBufferAccessInfo(num_wgs, phase, result);
     }
   }
 }
 
-void IfNode::CollectRegions(
-    std::vector<RegionAccessInfo> &result,
-    std::set<std::pair<Buffer, std::pair<int, int>>> &visited) const {
+void IfNode::CollectBufferAccessInfo(int num_wgs, SchedulePhase phase,
+                                     std::set<BufferAccessInfo> &result) const {
   if (task) {
-    task->CollectRegions(result, visited);
+    task->CollectBufferAccessInfo(num_wgs, phase, result);
   }
   if (then_child) {
-    then_child->CollectRegions(result, visited);
+    then_child->CollectBufferAccessInfo(num_wgs, phase, result);
   }
   if (else_child) {
-    else_child->CollectRegions(result, visited);
+    else_child->CollectBufferAccessInfo(num_wgs, phase, result);
   }
 }
 
