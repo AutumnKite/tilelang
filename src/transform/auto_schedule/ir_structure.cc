@@ -394,6 +394,9 @@ std::shared_ptr<IRStructure> IfNode::Clone() const {
 void ControlNode::CollectBufferAccessInfo(
     int num_wgs, SchedulePhase phase,
     std::set<BufferAccessInfo> &result) const {
+  if (task) {
+    task->CollectBufferAccessInfo(num_wgs, phase, result);
+  }
   if (child) {
     child->CollectBufferAccessInfo(num_wgs, phase, result);
   }
@@ -402,6 +405,9 @@ void ControlNode::CollectBufferAccessInfo(
 void WrapperNode::CollectBufferAccessInfo(
     int num_wgs, SchedulePhase phase,
     std::set<BufferAccessInfo> &result) const {
+  if (task) {
+    task->CollectBufferAccessInfo(num_wgs, phase, result);
+  }
   if (child) {
     child->CollectBufferAccessInfo(num_wgs, phase, result);
   }
