@@ -802,17 +802,13 @@ static void InsertSynchronization(
       }
       auto check_need_barrier = [&](ScheduleUnit *waiting_unit,
                                     int waiting_wg_id) {
+        if (unit == waiting_unit)
+          // Note: the logic here need some assumption.
+          return false;
         if (wg_id != waiting_wg_id)
           return true;
         if (!is_async)
           return false;
-        if (auto task = GetInnerTask(unit)) {
-          if (auto waiting_task = GetInnerTask(waiting_unit)) {
-            if (task->is_TCGEN05() && waiting_task->is_TCGEN05()) {
-              return false;
-            }
-          }
-        }
         return true;
       };
       bool need_barrier = false;
