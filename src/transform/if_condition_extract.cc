@@ -56,9 +56,10 @@ private:
       is_simple = false;
     }
 
-    auto bind_cond_var = [](const Stmt &sentence, const Var &cond) -> Stmt {
+    auto bind_cond_var = [](const Stmt &sentence,
+                            const PrimExpr &cond) -> Stmt {
       if (auto if_sentence = sentence.as<IfThenElseNode>()) {
-        PrimExpr new_cond = cond & if_sentence->condition;
+        PrimExpr new_cond = cond && if_sentence->condition;
         return IfThenElse(new_cond, if_sentence->then_case,
                           if_sentence->else_case);
       } else {
@@ -67,7 +68,7 @@ private:
     };
 
     auto bind_cond_var_body = [&](const Optional<Stmt> &body,
-                                  const Var &cond) -> Stmt {
+                                  const PrimExpr &cond) -> Stmt {
       if (!body.defined()) {
         return Stmt();
       }
@@ -85,7 +86,8 @@ private:
     Array<Stmt> new_seq;
     new_seq.insert(new_seq.end(), bind_cond_var_body(then_case, cond_var));
     if (else_case.defined())
-      new_seq.insert(new_seq.end(), bind_cond_var_body(else_case, cond_var));
+      new_seq.insert(new_seq.end(),
+                     bind_cond_var_body(else_case, Not(cond_var)));
 
     Stmt body =
         new_seq.empty()

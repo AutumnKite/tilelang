@@ -52,10 +52,13 @@ std::vector<PrimExpr>
 AssignWarpgroupIdsGlobal(IRStructure *root, const WarpSpecializeConfig &config,
                          PrimExpr thread_count);
 
-// Naive warpgroup assignment: TMA→wg1, compute→wg0, neutral→-1
+// Naive warpgroup assignment: TMA→wg1, compute→wg0,
+// broadcast→kWarpgroupBroadcast
 std::vector<PrimExpr>
 NaiveAssignWarpgroupIds(IRStructure *root, const WarpSpecializeConfig &config,
                         PrimExpr thread_count);
+
+void PropagateBroadcastWarpgroupId(IRStructure *root);
 
 // Extract all sequential task nodes from the IR structure tree
 void GatherTaskNodes(const std::vector<std::shared_ptr<IRStructure>> &nodes,
@@ -100,8 +103,10 @@ public:
     ScheduleRecursive(root, {});
 
     // Global warpgroup id assignment from the top level
-    return AssignWarpgroupIdsGlobal(root.get(), config_,
-                                    thread_var_->dom->extent);
+    auto result =
+        AssignWarpgroupIdsGlobal(root.get(), config_, thread_var_->dom->extent);
+    PropagateBroadcastWarpgroupId(root.get());
+    return result;
   }
 
   // Naive build: preserve original order, assign pipeline stages based on

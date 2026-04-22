@@ -46,6 +46,7 @@
 #include <algorithm>
 #include <cmath>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <memory>
 #include <optional>
@@ -59,7 +60,7 @@
 #include <vector>
 
 #include "../../op/builtin.h"
-#include "../../op/gemm_py.h"
+#include "../../op/gemm.h"
 #include "../../op/utils.h"
 #include "../../target/utils.h"
 #include "../common/attr.h"
@@ -195,6 +196,240 @@ std::set<Buffer> GetSharedDependencies(const IRStructure *a,
 
 bool HasRegisterRegion(const IRStructure *node) {
   return CountRegisterRegions(node) > 0;
+}
+
+// Collect register buffers read by all broadcast tasks in the IR tree.
+static void CollectBroadcastRegisterReads(
+    IRStructure *node, std::unordered_set<const BufferNode *> &reg_bufs) {
+  if (!node)
+    return;
+  auto collect_from_leaf_task = [&](const TaskNode *task) {
+    if (!task)
+      return;
+    int wg_id = task->GetWarpgroupId();
+    if (!IsWarpgroupBroadcast(wg_id) && wg_id != kWarpgroupUnassigned)
+      return;
+    for (const auto &region : task->GetReadRegions()) {
+      if (IsRegisterRegion(region)) {
+        reg_bufs.insert(region->buffer.get());
+      }
+    }
+  };
+  auto collect_from_structural_task = [&](const TaskNode *task) {
+    if (!task)
+      return;
+    for (const auto &region : task->GetReadRegions()) {
+      if (IsRegisterRegion(region)) {
+        reg_bufs.insert(region->buffer.get());
+      }
+    }
+  };
+
+  if (node->IsTask()) {
+    collect_from_leaf_task(static_cast<TaskNode *>(node));
+  } else if (node->IsControl()) {
+    auto ctrl = static_cast<ControlNode *>(node);
+    if (ctrl->task)
+      collect_from_structural_task(ctrl->task.get());
+    CollectBroadcastRegisterReads(ctrl->child.get(), reg_bufs);
+  } else if (node->IsWrapper()) {
+    auto wrapper = static_cast<WrapperNode *>(node);
+    if (wrapper->task)
+      collect_from_structural_task(wrapper->task.get());
+    CollectBroadcastRegisterReads(wrapper->child.get(), reg_bufs);
+  } else if (node->IsSequence()) {
+    auto seq = static_cast<SequenceNode *>(node);
+    for (auto &child : seq->children) {
+      CollectBroadcastRegisterReads(child.get(), reg_bufs);
+    }
+  } else if (node->IsScheduleUnit()) {
+    auto unit = static_cast<ScheduleUnit *>(node);
+    CollectBroadcastRegisterReads(unit->child.get(), reg_bufs);
+  } else if (node->IsIf()) {
+    auto if_node = static_cast<IfNode *>(node);
+    if (if_node->task)
+      collect_from_structural_task(if_node->task.get());
+    CollectBroadcastRegisterReads(if_node->then_child.get(), reg_bufs);
+    if (if_node->else_child)
+      CollectBroadcastRegisterReads(if_node->else_child.get(), reg_bufs);
+  }
+}
+
+// Propagate broadcast: if a broadcast task reads a register buffer,
+// any leaf task that writes that register buffer must also be broadcast
+// (because each wg needs its own initialized copy).
+void PropagateBroadcastWarpgroupId(IRStructure *root) {
+  std::vector<TaskNodeWithContext> all_tasks;
+  CollectAllTaskNodesWithContext(root, all_tasks);
+
+  bool changed = true;
+  while (changed) {
+    changed = false;
+    // 1. Collect register buffers read by all current broadcast tasks
+    std::unordered_set<const BufferNode *> broadcast_reg_reads;
+    CollectBroadcastRegisterReads(root, broadcast_reg_reads);
+    // Also collect from leaf broadcast tasks
+    for (auto &task_ctx : all_tasks) {
+      TaskNode *task = task_ctx.task;
+      if (!IsWarpgroupBroadcast(task->GetWarpgroupId()))
+        continue;
+      for (const auto &region : task->GetReadRegions()) {
+        if (IsRegisterRegion(region)) {
+          broadcast_reg_reads.insert(region->buffer.get());
+        }
+      }
+    }
+    // 2. Mark leaf tasks that write these register buffers as broadcast
+    if (!broadcast_reg_reads.empty()) {
+      for (auto &task_ctx : all_tasks) {
+        TaskNode *task = task_ctx.task;
+        if (IsWarpgroupBroadcast(task->GetWarpgroupId()))
+          continue;
+        for (const auto &region : task->GetWriteRegions()) {
+          if (IsRegisterRegion(region) &&
+              broadcast_reg_reads.count(region->buffer.get())) {
+            task->SetWarpgroupId(kWarpgroupBroadcast);
+            changed = true;
+            break;
+          }
+        }
+      }
+    }
+
+    // 3. Detect cross-warpgroup register buffer / scalar-var accesses
+    constexpr int kReaderAnyWg = std::numeric_limits<int>::min();
+    std::unordered_map<const BufferNode *, std::unordered_set<int>>
+        buffer_reader_wgs;
+    std::unordered_map<const BufferNode *, std::unordered_set<int>>
+        buffer_writer_wgs;
+    std::unordered_map<const VarNode *, std::unordered_set<int>> var_reader_wgs;
+    std::unordered_map<const VarNode *, std::unordered_set<int>> var_writer_wgs;
+
+    auto add_accesses = [&](const TaskNode *task, int reader_key, int wg_id) {
+      for (const auto &region : task->GetReadRegions()) {
+        if (IsRegisterRegion(region)) {
+          buffer_reader_wgs[region->buffer.get()].insert(reader_key);
+        }
+      }
+      if (wg_id >= 0) {
+        for (const auto &region : task->GetWriteRegions()) {
+          if (IsRegisterRegion(region)) {
+            buffer_writer_wgs[region->buffer.get()].insert(wg_id);
+          }
+        }
+      }
+      for (const auto &v : task->GetReadVars()) {
+        var_reader_wgs[v.get()].insert(reader_key);
+      }
+      if (wg_id >= 0) {
+        for (const auto &v : task->GetWriteVars()) {
+          var_writer_wgs[v.get()].insert(wg_id);
+        }
+      }
+    };
+
+    for (auto &task_ctx : all_tasks) {
+      TaskNode *task = task_ctx.task;
+      int wg_id = task->GetWarpgroupId();
+      int reader_key = (wg_id >= 0) ? wg_id : kReaderAnyWg;
+      add_accesses(task, reader_key, wg_id);
+    }
+    // Also include structural tasks
+    std::function<void(IRStructure *)> walk_structural =
+        [&](IRStructure *node) {
+          if (!node)
+            return;
+          auto add_struct = [&](const TaskNode *t) {
+            if (!t)
+              return;
+            int wg = t->GetWarpgroupId();
+            int key = (wg >= 0) ? wg : kReaderAnyWg;
+            if (IsWarpgroupBroadcast(wg))
+              key = kReaderAnyWg;
+            add_accesses(t, key, -1);
+          };
+          if (node->IsControl()) {
+            auto *c = static_cast<ControlNode *>(node);
+            add_struct(c->task.get());
+            walk_structural(c->child.get());
+          } else if (node->IsWrapper()) {
+            auto *w = static_cast<WrapperNode *>(node);
+            add_struct(w->task.get());
+            walk_structural(w->child.get());
+          } else if (node->IsIf()) {
+            auto *i = static_cast<IfNode *>(node);
+            add_struct(i->task.get());
+            walk_structural(i->then_child.get());
+            walk_structural(i->else_child.get());
+          } else if (node->IsSequence()) {
+            auto *s = static_cast<SequenceNode *>(node);
+            for (auto &c : s->children)
+              walk_structural(c.get());
+          } else if (node->IsScheduleUnit()) {
+            auto *u = static_cast<ScheduleUnit *>(node);
+            walk_structural(u->child.get());
+          }
+          // Leaf tasks already handled by the all_tasks loop.
+        };
+    walk_structural(root);
+
+    std::unordered_set<const BufferNode *> cross_wg_buffers;
+    for (const auto &kv : buffer_reader_wgs) {
+      const auto *buf = kv.first;
+      const auto &reader_wgs = kv.second;
+      const auto &writer_wgs = buffer_writer_wgs[buf];
+      for (int rwg : reader_wgs) {
+        if (writer_wgs.find(rwg) == writer_wgs.end()) {
+          cross_wg_buffers.insert(buf);
+          break;
+        }
+      }
+    }
+
+    std::unordered_set<const VarNode *> cross_wg_vars;
+    for (const auto &kv : var_reader_wgs) {
+      const auto *v = kv.first;
+      const auto &reader_wgs = kv.second;
+      auto it_w = var_writer_wgs.find(v);
+      if (it_w == var_writer_wgs.end())
+        continue;
+      const auto &writer_wgs = it_w->second;
+      for (int rwg : reader_wgs) {
+        if (writer_wgs.find(rwg) == writer_wgs.end()) {
+          cross_wg_vars.insert(v);
+          break;
+        }
+      }
+    }
+
+    if (!cross_wg_buffers.empty() || !cross_wg_vars.empty()) {
+      for (auto &task_ctx : all_tasks) {
+        TaskNode *task = task_ctx.task;
+        if (IsWarpgroupBroadcast(task->GetWarpgroupId()))
+          continue;
+        bool should_broadcast = false;
+        for (const auto &region : task->GetWriteRegions()) {
+          if (IsRegisterRegion(region) &&
+              cross_wg_buffers.count(region->buffer.get())) {
+            should_broadcast = true;
+            break;
+          }
+        }
+        if (!should_broadcast) {
+          for (const auto &v : task->GetWriteVars()) {
+            if (cross_wg_vars.count(v.get())) {
+              should_broadcast = true;
+              break;
+            }
+          }
+        }
+        if (should_broadcast) {
+          task->SetWarpgroupId(kWarpgroupBroadcast);
+          changed = true;
+        }
+      }
+    }
+  }
 }
 
 bool HasResourceDependency(const IRStructure *a, const IRStructure *b) {
@@ -370,7 +605,14 @@ AssignWarpgroupIdsGlobal(IRStructure *root, const WarpSpecializeConfig &config,
   int n = all_tasks.size();
 
   for (auto &task_ctx : all_tasks) {
-    task_ctx.task->SetWarpgroupId(-1);
+    task_ctx.task->SetWarpgroupId(kWarpgroupUnassigned);
+  }
+
+  // Tasks with loop_break are broadcast to all warp groups
+  for (auto &task_ctx : all_tasks) {
+    if (task_ctx.task->ContainsLoopBreak()) {
+      task_ctx.task->SetWarpgroupId(kWarpgroupBroadcast);
+    }
   }
 
   TaskUnionFind uf(n);
@@ -747,7 +989,7 @@ NaiveAssignWarpgroupIds(IRStructure *root, const WarpSpecializeConfig &config,
   for (auto &task_ctx : all_tasks) {
     TaskNode *task = task_ctx.task;
     if (task->ContainsLoopBreak()) {
-      task->SetWarpgroupId(-1);
+      task->SetWarpgroupId(kWarpgroupBroadcast);
       continue;
     }
     if (task->UsesTMACore() && !task->UsesTensorCore()) {
@@ -1003,7 +1245,10 @@ void ScheduleUnitBuilder::NaiveScheduleRecursive(
 std::vector<PrimExpr>
 ScheduleUnitBuilder::NaiveBuild(std::shared_ptr<IRStructure> &root) {
   NaiveScheduleRecursive(root);
-  return NaiveAssignWarpgroupIds(root.get(), config_, thread_var_->dom->extent);
+  auto result =
+      NaiveAssignWarpgroupIds(root.get(), config_, thread_var_->dom->extent);
+  PropagateBroadcastWarpgroupId(root.get());
+  return result;
 }
 
 } // namespace tl
