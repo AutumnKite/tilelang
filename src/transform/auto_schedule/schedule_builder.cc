@@ -1114,6 +1114,23 @@ void ScheduleUnitBuilder::NaiveScheduleLoop(ControlNode *ctrl) {
                     node_i_let_stmt->value, Evaluate(0));
         auto cloned_task = std::make_shared<TaskNode>();
         cloned_task->stmts.push_back(cloned_let_stmt);
+        cloned_task->SetReadRegions(node_i_task->GetReadRegions());
+        cloned_task->SetWriteRegions(node_i_task->GetWriteRegions());
+        cloned_task->SetReadVars(node_i_task->GetReadVars());
+        {
+          auto write_vars = node_i_task->GetWriteVars();
+          for (auto &v : write_vars) {
+            if (v.same_as(node_i_let_stmt->var)) {
+              v = cloned_let_stmt->var;
+            }
+          }
+          cloned_task->SetWriteVars(write_vars);
+        }
+        cloned_task->SetLatency(node_i_task->GetLatency());
+        cloned_task->SetII(node_i_task->GetII());
+        cloned_task->SetUsesCUDACore(node_i_task->UsesCUDACore());
+        cloned_task->SetUsesTMACore(node_i_task->UsesTMACore());
+        cloned_task->SetUsesTensorCore(node_i_task->UsesTensorCore());
         stage_map[cloned_task.get()] = rem_stage_j;
 
         for (int k = j; k < n; ++k) {
