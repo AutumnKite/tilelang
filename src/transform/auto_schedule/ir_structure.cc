@@ -279,7 +279,7 @@ void TaskNode::CollectBufferAccessInfo(
   auto emit_access = [&](const BufferRegion &region, bool is_write) {
     if (wg_id >= 0) {
       // Normal assigned warpgroup
-      result.emplace(region->buffer, is_write, wg_id, phase);
+      result.emplace(region->buffer, is_write, wg_id, this);
     } else if (IsWarpgroupBroadcast(wg_id)) {
       // Broadcast: skip register memory (each wg has its own copy)
       if (IsRegisterRegion(region)) {
@@ -287,12 +287,12 @@ void TaskNode::CollectBufferAccessInfo(
       }
       // Shared/global memory is shared across wgs — emit for all
       for (int i = 0; i < num_wgs; ++i) {
-        result.emplace(region->buffer, is_write, i, phase);
+        result.emplace(region->buffer, is_write, i, this);
       }
     } else {
       // Unassigned (kWarpgroupUnassigned): expand to all wgs (legacy behavior)
       for (int i = 0; i < num_wgs; ++i) {
-        result.emplace(region->buffer, is_write, i, phase);
+        result.emplace(region->buffer, is_write, i, this);
       }
     }
   };

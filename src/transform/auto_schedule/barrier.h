@@ -585,6 +585,37 @@ static TaskNode *GetInnerTask(ScheduleUnit *unit) {
   }
 }
 
+struct SyncInfo {
+  int distance;             // the distance of iterations
+  Buffer buffer;            // the buffer that requires synchronization
+  const TaskNode *producer; // the innermost task that needs to be waited on
+  const TaskNode *consumer; // the innermost task that needs to wait
+  int buffer_versions; // the number of versions for the buffer (for calculating
+                       // barrier slots)
+
+  SyncInfo(int distance, Buffer buffer, const TaskNode *producer,
+           const TaskNode *consumer, int buffer_versions)
+      : distance(distance), buffer(buffer), producer(producer),
+        consumer(consumer), buffer_versions(buffer_versions) {}
+
+  // Define operator< for set
+  bool operator<(const SyncInfo &other) const {
+    if (distance != other.distance) {
+      return distance < other.distance;
+    }
+    if (buffer->name != other.buffer->name) {
+      return buffer->name < other.buffer->name;
+    }
+    if (producer != other.producer) {
+      return producer < other.producer;
+    }
+    if (consumer != other.consumer) {
+      return consumer < other.consumer;
+    }
+    return buffer_versions < other.buffer_versions;
+  }
+};
+
 static auto
 GetSyncInfos(const std::vector<ScheduleUnit *> &units, int num_wgs,
              const std::unordered_map<Buffer, int, ObjectPtrHash,
@@ -598,7 +629,7 @@ GetSyncInfos(const std::vector<ScheduleUnit *> &units, int num_wgs,
     }
   }
   std::map<std::pair<ScheduleUnit *, int>,
-           std::pair<int, std::map<std::pair<ScheduleUnit *, int>, int>>>
+           std::map<std::pair<ScheduleUnit *, int>, std::set<SyncInfo>>>
       sync_infos;
   for (const auto &buffer : buffers) {
     int num_versions = 1;
@@ -607,7 +638,9 @@ GetSyncInfos(const std::vector<ScheduleUnit *> &units, int num_wgs,
       num_versions = it->second;
     }
     std::vector<ScheduleUnit *> last_read_unit(num_wgs, nullptr);
+    std::vector<std::set<const TaskNode *>> last_read_unit_tasks(num_wgs);
     ScheduleUnit *last_write_unit = nullptr;
+    std::set<const TaskNode *> last_write_unit_tasks;
     int last_write_wg_id = -1;
     std::vector<bool> waited_write_wgs(num_wgs, false);
     for (int iter = 0; iter < (is_loop ? 2 : 1); ++iter) {
@@ -618,16 +651,14 @@ GetSyncInfos(const std::vector<ScheduleUnit *> &units, int num_wgs,
           ICHECK(0 <= wg_id && wg_id < num_wgs);
           if (buffer_access.buffer != buffer)
             continue;
-          auto add_sync = [&](ScheduleUnit *wait_unit, int wait_wg_id) {
+          auto add_sync = [&](ScheduleUnit *wait_unit, int wait_wg_id,
+                              const std::set<const TaskNode *> &wait_tasks) {
             int distance = iter ? num_versions : 0;
-            auto &[barrier_versions, wait_map] =
-                sync_infos[{wait_unit, wait_wg_id}];
-            barrier_versions = std::max(barrier_versions, num_versions);
+            auto &wait_map = sync_infos[{wait_unit, wait_wg_id}];
             auto it = wait_map.find({unit, wg_id});
-            if (it == wait_map.end()) {
-              wait_map[{unit, wg_id}] = distance;
-            } else {
-              it->second = std::min(it->second, distance);
+            for (auto wait_task : wait_tasks) {
+              wait_map[{unit, wg_id}].emplace(distance, buffer, wait_task,
+                                              buffer_access.task, num_versions);
             }
           };
           if (!buffer_access.is_write) {
@@ -635,12 +666,13 @@ GetSyncInfos(const std::vector<ScheduleUnit *> &units, int num_wgs,
               continue;
             if (waited_write_wgs[wg_id])
               continue;
-            add_sync(last_write_unit, last_write_wg_id);
+            add_sync(last_write_unit, last_write_wg_id, last_write_unit_tasks);
           } else {
             for (int last_wg_id = 0; last_wg_id < num_wgs; ++last_wg_id) {
               if (last_read_unit[last_wg_id] == nullptr)
                 continue;
-              add_sync(last_read_unit[last_wg_id], last_wg_id);
+              add_sync(last_read_unit[last_wg_id], last_wg_id,
+                       last_read_unit_tasks[last_wg_id]);
             }
           }
         }
@@ -652,10 +684,12 @@ GetSyncInfos(const std::vector<ScheduleUnit *> &units, int num_wgs,
               continue;
             if (!buffer_access.is_write) {
               waited_write_wgs[wg_id] = true;
+              last_read_unit_tasks[wg_id].clear();
             } else {
               for (int wg_id = 0; wg_id < num_wgs; ++wg_id) {
                 last_read_unit[wg_id] = nullptr;
               }
+              last_write_unit_tasks.clear();
             }
           }
           for (const auto &buffer_access :
@@ -665,8 +699,10 @@ GetSyncInfos(const std::vector<ScheduleUnit *> &units, int num_wgs,
               continue;
             if (!buffer_access.is_write) {
               last_read_unit[wg_id] = unit;
+              last_read_unit_tasks[wg_id].insert(buffer_access.task);
             } else {
               last_write_unit = unit;
+              last_write_unit_tasks.insert(buffer_access.task);
               last_write_wg_id = wg_id;
               for (int wg_id = 0; wg_id < num_wgs; ++wg_id) {
                 waited_write_wgs[wg_id] = false;
@@ -682,19 +718,15 @@ GetSyncInfos(const std::vector<ScheduleUnit *> &units, int num_wgs,
 
 static void InsertSynchronization(
     const std::vector<ScheduleUnit *> &units,
-    const std::map<
-        std::pair<ScheduleUnit *, int>,
-        std::pair<int, std::map<std::pair<ScheduleUnit *, int>, int>>>
+    const std::map<std::pair<ScheduleUnit *, int>,
+                   std::map<std::pair<ScheduleUnit *, int>, std::set<SyncInfo>>>
         &sync_infos,
     int &next_barrier_id, std::vector<Buffer> &barrier_buffers,
     Map<ObjectRef, ObjectRef> &barrier_map,
     const std::vector<PrimExpr> &thread_count, LoopNestingInfo &loop_info) {
-  std::map<ScheduleUnit *, int> unit_to_order;
-  for (size_t i = 0; i < units.size(); ++i) {
-    unit_to_order[units[i]] = i;
-  }
-  // Initiate WGMMA tracking structures
   int num_wgs = thread_count.size();
+  // Initiate WGMMA tracking structures
+  /*
   std::vector<int> wgmma_count(num_wgs, 0);
   std::vector<std::map<ScheduleUnit *, int>> wgmma_id(num_wgs);
   for (auto unit : units) {
@@ -711,18 +743,19 @@ static void InsertSynchronization(
       }
     }
   }
+  */
   // Insert synchronization statements based on sync_infos
   for (auto unit : units) {
     for (int wg_id = 0; wg_id < num_wgs; ++wg_id) {
       auto sync_it = sync_infos.find({unit, wg_id});
       if (sync_it == sync_infos.end())
         continue;
-      const auto &wait_map = sync_it->second.second;
+      const auto &wait_map = sync_it->second;
       bool is_async = unit->UsesTMACore() || unit->UsesTensorCore();
       // Handle WGMMA synchronization
       if (unit->HasWGMMA()) {
         bool different_wg_id = false;
-        for (const auto &[waiting_unit_info, distance] : wait_map) {
+        for (const auto &[waiting_unit_info, _] : wait_map) {
           auto [waiting_unit, waiting_wg_id] = waiting_unit_info;
           if (waiting_wg_id != wg_id) {
             different_wg_id = true;
@@ -730,19 +763,8 @@ static void InsertSynchronization(
           }
         }
         if (!different_wg_id) {
-          for (const auto &[waiting_unit_info, distance] : wait_map) {
+          for (const auto &[waiting_unit_info, _] : wait_map) {
             auto [waiting_unit, waiting_wg_id] = waiting_unit_info;
-            // Error: wrong num_mma in prologue and epilogue.
-            // Cannot fix now.
-            //
-            // int real_distance = distance + unit->stage - waiting_unit->stage;
-            // int num_mma = wgmma_id[wg_id][waiting_unit] -
-            // wgmma_id[wg_id][unit]; num_mma += real_distance *
-            // wgmma_count[wg_id]; if (unit->isInnerTask()) {
-            //   --num_mma;
-            // }
-            //
-            // Fallback to set num_mma to 0 to avoid error.
             int num_mma = 0;
             Stmt wait_stmt =
                 Evaluate(Call(DataType::Handle(), wait_wgmma(), {num_mma}));
@@ -759,7 +781,13 @@ static void InsertSynchronization(
         // unit as synchronized unless it uses other asynchronous operations.
         is_async = unit->UsesTMACore();
       }
-      int barrier_versions = std::max(sync_it->second.first, 1);
+      int barrier_versions = 1;
+      for (const auto &[waiting_unit_info, sync_infos] : wait_map) {
+        for (const auto &sync_info : sync_infos) {
+          barrier_versions =
+              std::max(barrier_versions, sync_info.buffer_versions);
+        }
+      }
       Buffer barrier_buffer;
       // Handle single special task, such as TCGEN05 or TMA load, that requires
       // a barrier for itself.
@@ -774,9 +802,15 @@ static void InsertSynchronization(
               indexmod(loop_info.CalculateIterationCount(), barrier_versions);
           PrimExpr mbar_expr = BufferLoad(barrier_buffer, {version_index});
           RewriteGemmMbar(task, mbar_expr);
-          // Stmt arrive_stmt =
-          //     makeTcgen05MmaArrive(barrier_buffer, version_index);
-          // InsertStatementIntoScheduleUnit(unit, arrive_stmt, false, wg_id);
+          // TODO: need to change the lower of tcgen05_gemm to check if there is
+          // already a arrive statement. Then we can manually insert the arrive
+          // statement to deal with the case where the tcgen05_gemm is inside an
+          // if condition.
+          /*
+          Stmt arrive_stmt =
+              makeTcgen05MmaArrive(barrier_buffer, version_index);
+          InsertStatementIntoScheduleUnit(unit, arrive_stmt, false, wg_id);
+          */
         }
         if (task->HasTMALoad() && task_wg_id == wg_id) {
           int barrier_id = next_barrier_id++;
@@ -792,7 +826,8 @@ static void InsertSynchronization(
         }
       }
       auto check_need_barrier = [&](ScheduleUnit *waiting_unit,
-                                    int waiting_wg_id) {
+                                    int waiting_wg_id,
+                                    const SyncInfo &sync_info) {
         if (unit == waiting_unit)
           // Note: the logic here need some assumption.
           return false;
@@ -800,13 +835,24 @@ static void InsertSynchronization(
           return true;
         if (!is_async)
           return false;
+        if (!sync_info.producer->UsesTMACore() &&
+            !sync_info.producer->UsesTensorCore())
+          return false;
+        if (sync_info.producer->UsesTensorCore() &&
+            sync_info.consumer->UsesTensorCore())
+          return false;
         return true;
       };
       bool need_barrier = false;
-      for (const auto &[waiting_unit_info, distance] : wait_map) {
+      for (const auto &[waiting_unit_info, sync_infos] : wait_map) {
         auto [waiting_unit, waiting_wg_id] = waiting_unit_info;
-        if (check_need_barrier(waiting_unit, waiting_wg_id)) {
-          need_barrier = true;
+        for (const auto &sync_info : sync_infos) {
+          if (check_need_barrier(waiting_unit, waiting_wg_id, sync_info)) {
+            need_barrier = true;
+            break;
+          }
+        }
+        if (need_barrier) {
           break;
         }
       }
@@ -839,9 +885,15 @@ static void InsertSynchronization(
         }
       }
       // Add wait statements for all waiting units.
-      for (const auto &[waiting_unit_info, distance] : wait_map) {
+      for (const auto &[waiting_unit_info, sync_infos] : wait_map) {
         auto [waiting_unit, waiting_wg_id] = waiting_unit_info;
-        if (check_need_barrier(waiting_unit, waiting_wg_id)) {
+        int distance = 100;
+        for (const auto &sync_info : sync_infos) {
+          if (check_need_barrier(waiting_unit, waiting_wg_id, sync_info)) {
+            distance = std::min(distance, sync_info.distance);
+          }
+        }
+        if (distance < 100) {
           PrimExpr iteration = loop_info.CalculateIterationCount() - distance;
           PrimExpr version_index = indexmod(iteration, barrier_versions);
           PrimExpr mbar_expr = BufferLoad(barrier_buffer, {version_index});

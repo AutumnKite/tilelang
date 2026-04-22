@@ -54,14 +54,14 @@ inline bool IsWarpgroupBroadcast(int wg_id) {
 // Structure to store buffer access information
 struct BufferAccessInfo {
   Buffer buffer;
-  bool is_write;    // true for write, false for read
-  int warpgroup_id; // warpgroup id of the innermost TaskNode
-  SchedulePhase schedule_phase{SchedulePhase::kBody}; // scheduling phase
+  bool is_write;        // true for write, false for read
+  int warpgroup_id;     // warpgroup id of the access
+  const TaskNode *task; // the innermost TaskNode
 
   BufferAccessInfo(Buffer buffer, bool is_write, int warpgroup_id,
-                   SchedulePhase phase = SchedulePhase::kBody)
+                   const TaskNode *task)
       : buffer(buffer), is_write(is_write), warpgroup_id(warpgroup_id),
-        schedule_phase(phase) {}
+        task(task) {}
 
   // Define operator< for set
   bool operator<(const BufferAccessInfo &other) const {
@@ -74,8 +74,8 @@ struct BufferAccessInfo {
     if (warpgroup_id != other.warpgroup_id) {
       return warpgroup_id < other.warpgroup_id;
     }
-    if (schedule_phase != other.schedule_phase) {
-      return schedule_phase < other.schedule_phase;
+    if (task != other.task) {
+      return task < other.task;
     }
     return false;
   }
