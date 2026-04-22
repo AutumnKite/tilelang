@@ -124,6 +124,153 @@ static Stmt RenameLetStmtVars(Stmt stmt, const std::string &suffix) {
   return LetStmtVarRenamer(suffix).Rename(std::move(stmt));
 }
 
+// Mutator that replaces references to selected Buffers with their duplicates.
+class BufferRemapMutator : public StmtExprMutator {
+public:
+  explicit BufferRemapMutator(const Map<Buffer, Buffer> &buffer_remap)
+      : buffer_remap_(buffer_remap) {
+    for (const auto &kv : buffer_remap_) {
+      var_to_new_buffer_.Set(kv.first->data, kv.second);
+    }
+  }
+
+  PrimExpr VisitExpr_(const BufferLoadNode *op) final {
+    BufferLoad load = Downcast<BufferLoad>(StmtExprMutator::VisitExpr_(op));
+    auto it = buffer_remap_.find(load->buffer);
+    if (it == buffer_remap_.end())
+      return std::move(load);
+    auto *n = load.CopyOnWrite();
+    n->buffer = (*it).second;
+    return std::move(load);
+  }
+
+  Stmt VisitStmt_(const BufferStoreNode *op) final {
+    BufferStore store = Downcast<BufferStore>(StmtExprMutator::VisitStmt_(op));
+    auto it = buffer_remap_.find(store->buffer);
+    if (it == buffer_remap_.end())
+      return std::move(store);
+    auto *n = store.CopyOnWrite();
+    n->buffer = (*it).second;
+    return std::move(store);
+  }
+
+  PrimExpr VisitExpr_(const VarNode *op) final {
+    Var var = GetRef<Var>(op);
+    auto it = var_to_new_buffer_.find(var);
+    if (it != var_to_new_buffer_.end()) {
+      return (*it).second->data;
+    }
+    return StmtExprMutator::VisitExpr_(op);
+  }
+
+  BufferRegion RemapRegion(const BufferRegion &region) const {
+    auto it = buffer_remap_.find(region->buffer);
+    if (it == buffer_remap_.end())
+      return region;
+    return BufferRegion((*it).second, region->region);
+  }
+
+  Var RemapVar(const Var &var) const {
+    auto it = var_to_new_buffer_.find(var);
+    if (it == var_to_new_buffer_.end())
+      return var;
+    return (*it).second->data;
+  }
+
+private:
+  const Map<Buffer, Buffer> &buffer_remap_;
+  Map<Var, Buffer> var_to_new_buffer_;
+};
+
+// Collect all local.fragment Buffers
+static void CollectBroadcastFragmentBuffersImpl(
+    const IRStructure *node, std::unordered_set<const BufferNode *> &seen,
+    std::vector<Buffer> &out) {
+  if (!node)
+    return;
+  if (node->IsTask()) {
+    auto task = static_cast<const TaskNode *>(node);
+    if (IsWarpgroupBroadcast(task->GetWarpgroupId())) {
+      for (const auto &region : task->GetWriteRegions()) {
+        if (IsRegisterRegion(region) &&
+            region->buffer.scope() == "local.fragment") {
+          if (!seen.count(region->buffer.get())) {
+            seen.insert(region->buffer.get());
+            out.push_back(region->buffer);
+          }
+        }
+      }
+    }
+  } else if (node->IsSequence()) {
+    for (const auto &child :
+         static_cast<const SequenceNode *>(node)->children) {
+      CollectBroadcastFragmentBuffersImpl(child.get(), seen, out);
+    }
+  } else if (node->IsControl()) {
+    auto ctrl = static_cast<const ControlNode *>(node);
+    CollectBroadcastFragmentBuffersImpl(ctrl->task.get(), seen, out);
+    CollectBroadcastFragmentBuffersImpl(ctrl->child.get(), seen, out);
+  } else if (node->IsWrapper()) {
+    auto wrapper = static_cast<const WrapperNode *>(node);
+    CollectBroadcastFragmentBuffersImpl(wrapper->task.get(), seen, out);
+    CollectBroadcastFragmentBuffersImpl(wrapper->child.get(), seen, out);
+  } else if (node->IsScheduleUnit()) {
+    CollectBroadcastFragmentBuffersImpl(
+        static_cast<const ScheduleUnit *>(node)->child.get(), seen, out);
+  } else if (node->IsIf()) {
+    auto if_node = static_cast<const IfNode *>(node);
+    CollectBroadcastFragmentBuffersImpl(if_node->task.get(), seen, out);
+    CollectBroadcastFragmentBuffersImpl(if_node->then_child.get(), seen, out);
+    CollectBroadcastFragmentBuffersImpl(if_node->else_child.get(), seen, out);
+  }
+}
+
+static std::vector<Buffer>
+CollectBroadcastFragmentBuffers(const IRStructure *root) {
+  std::vector<Buffer> result;
+  std::unordered_set<const BufferNode *> seen;
+  CollectBroadcastFragmentBuffersImpl(root, seen, result);
+  return result;
+}
+
+static Buffer DuplicateFragmentBuffer(const Buffer &buffer,
+                                      const std::string &suffix) {
+  Type new_type = buffer->data->type_annotation;
+  if (IsFragmentBuffer(buffer)) {
+    const auto *ptr_type = buffer->data->type_annotation.as<PointerTypeNode>();
+    ICHECK(ptr_type);
+    new_type = PointerType(ptr_type->element_type, "local");
+  }
+  Var new_var(buffer->data->name_hint + suffix, new_type);
+  return Buffer(new_var, buffer->dtype, buffer->shape, buffer->strides,
+                buffer->elem_offset, buffer->name + suffix,
+                buffer->data_alignment, buffer->offset_factor,
+                buffer->buffer_type);
+}
+
+static void ApplyBufferRemapToTask(TaskNode *task,
+                                   BufferRemapMutator &mutator) {
+  for (size_t i = 0; i < task->stmts.size(); ++i) {
+    task->stmts[i] = mutator(task->stmts[i]);
+  }
+  auto read_regions = task->GetReadRegions();
+  for (auto &r : read_regions)
+    r = mutator.RemapRegion(r);
+  task->SetReadRegions(read_regions);
+  auto write_regions = task->GetWriteRegions();
+  for (auto &r : write_regions)
+    r = mutator.RemapRegion(r);
+  task->SetWriteRegions(write_regions);
+  auto read_vars = task->GetReadVars();
+  for (auto &v : read_vars)
+    v = mutator.RemapVar(v);
+  task->SetReadVars(read_vars);
+  auto write_vars = task->GetWriteVars();
+  for (auto &v : write_vars)
+    v = mutator.RemapVar(v);
+  task->SetWriteVars(write_vars);
+}
+
 bool IsLetDeclTask(const TaskNode *task) {
   return task->stmts.size() == 1 && task->stmts[0].as<LetStmtNode>() != nullptr;
 }
@@ -178,9 +325,29 @@ bool ContainsLetDecl(const IRStructure *node) {
 // Helper function to clone IRStructure with warpgroup filter.
 std::shared_ptr<IRStructure>
 CloneIRStructureWithWarpgroupFilter(IRStructure *node, int warpgroup_id,
-                                    Map<Var, PrimExpr> &var_remap) {
+                                    Map<Var, PrimExpr> &var_remap,
+                                    Map<Buffer, Buffer> &buffer_remap) {
   if (!node)
     return nullptr;
+
+  auto apply_buffer_remap_stmt = [&](Stmt s) -> Stmt {
+    if (buffer_remap.empty())
+      return s;
+    BufferRemapMutator m(buffer_remap);
+    return m(std::move(s));
+  };
+  auto apply_buffer_remap_expr = [&](PrimExpr e) -> PrimExpr {
+    if (buffer_remap.empty())
+      return e;
+    BufferRemapMutator m(buffer_remap);
+    return m(std::move(e));
+  };
+  auto apply_buffer_remap_task = [&](TaskNode *ct) {
+    if (buffer_remap.empty())
+      return;
+    BufferRemapMutator m(buffer_remap);
+    ApplyBufferRemapToTask(ct, m);
+  };
 
   if (node->IsTask()) {
     auto task = static_cast<TaskNode *>(node);
@@ -197,6 +364,7 @@ CloneIRStructureWithWarpgroupFilter(IRStructure *node, int warpgroup_id,
       // Substitute previously renamed variables in the value expression.
       PrimExpr new_value =
           var_remap.empty() ? let->value : Substitute(let->value, var_remap);
+      new_value = apply_buffer_remap_expr(new_value);
       var_remap.Set(let->var, new_var);
       auto new_task = std::make_shared<TaskNode>();
       new_task->stmts.push_back(LetStmt(new_var, new_value, Evaluate(0)));
@@ -214,6 +382,7 @@ CloneIRStructureWithWarpgroupFilter(IRStructure *node, int warpgroup_id,
         ct->stmts[i] = Substitute(ct->stmts[i], var_remap);
       }
     }
+    apply_buffer_remap_task(static_cast<TaskNode *>(cloned.get()));
     return cloned;
   } else if (node->IsSequence()) {
     // A SequenceNode is included if it contains the target warp group
@@ -224,7 +393,7 @@ CloneIRStructureWithWarpgroupFilter(IRStructure *node, int warpgroup_id,
     auto new_seq = std::make_shared<SequenceNode>();
     for (const auto &child : seq->children) {
       auto new_child = CloneIRStructureWithWarpgroupFilter(
-          child.get(), warpgroup_id, var_remap);
+          child.get(), warpgroup_id, var_remap, buffer_remap);
       if (new_child) {
         new_seq->children.push_back(std::move(new_child));
       }
@@ -243,12 +412,13 @@ CloneIRStructureWithWarpgroupFilter(IRStructure *node, int warpgroup_id,
     auto new_loop_var = ctrl->control->loop_var.copy_with_suffix("");
     new_for.CopyOnWrite()->loop_var = new_loop_var;
     var_remap.Set(ctrl->control->loop_var, new_loop_var);
-    new_for.CopyOnWrite()->min = Substitute(ctrl->control->min, var_remap);
+    new_for.CopyOnWrite()->min =
+        apply_buffer_remap_expr(Substitute(ctrl->control->min, var_remap));
     new_for.CopyOnWrite()->extent =
-        Substitute(ctrl->control->extent, var_remap);
+        apply_buffer_remap_expr(Substitute(ctrl->control->extent, var_remap));
     if (ctrl->control->step.has_value()) {
-      new_for.CopyOnWrite()->step =
-          Substitute(ctrl->control->step.value(), var_remap);
+      new_for.CopyOnWrite()->step = apply_buffer_remap_expr(
+          Substitute(ctrl->control->step.value(), var_remap));
     }
     new_ctrl->control = new_for;
     // Clone the task and apply var_remap so each warpgroup gets its own copy
@@ -261,11 +431,12 @@ CloneIRStructureWithWarpgroupFilter(IRStructure *node, int warpgroup_id,
           cloned_task->stmts[i] = Substitute(cloned_task->stmts[i], var_remap);
         }
       }
+      apply_buffer_remap_task(cloned_task.get());
       new_ctrl->task = std::move(cloned_task);
     }
     new_ctrl->SetPromote(ctrl->hasPromote());
     new_ctrl->child = CloneIRStructureWithWarpgroupFilter(
-        ctrl->child.get(), warpgroup_id, var_remap);
+        ctrl->child.get(), warpgroup_id, var_remap, buffer_remap);
     return new_ctrl;
   } else if (node->IsWrapper()) {
     if (!node->containWarpgroupId(warpgroup_id) && !ContainsLetDecl(node))
@@ -277,8 +448,9 @@ CloneIRStructureWithWarpgroupFilter(IRStructure *node, int warpgroup_id,
     new_wrapper->wrapper = var_remap.empty()
                                ? wrapper->wrapper
                                : Substitute(wrapper->wrapper, var_remap);
+    new_wrapper->wrapper = apply_buffer_remap_stmt(new_wrapper->wrapper);
     new_wrapper->child = CloneIRStructureWithWarpgroupFilter(
-        wrapper->child.get(), warpgroup_id, var_remap);
+        wrapper->child.get(), warpgroup_id, var_remap, buffer_remap);
     return new_wrapper;
   } else if (node->IsScheduleUnit()) {
     auto unit = static_cast<ScheduleUnit *>(node);
@@ -292,7 +464,7 @@ CloneIRStructureWithWarpgroupFilter(IRStructure *node, int warpgroup_id,
     auto new_unit = std::make_shared<ScheduleUnit>();
     new_unit->stage = unit->stage;
     new_unit->child = CloneIRStructureWithWarpgroupFilter(
-        unit->child.get(), warpgroup_id, var_remap);
+        unit->child.get(), warpgroup_id, var_remap, buffer_remap);
 
     if (!child_is_let_decl) {
       // Copy before/after for the target warp group
@@ -307,6 +479,12 @@ CloneIRStructureWithWarpgroupFilter(IRStructure *node, int warpgroup_id,
           s = Substitute(s, var_remap);
         }
       }
+      for (auto &s : new_unit->before[warpgroup_id]) {
+        s = apply_buffer_remap_stmt(s);
+      }
+      for (auto &s : new_unit->after[warpgroup_id]) {
+        s = apply_buffer_remap_stmt(s);
+      }
     }
     return new_unit;
   } else if (node->IsIf()) {
@@ -317,6 +495,7 @@ CloneIRStructureWithWarpgroupFilter(IRStructure *node, int warpgroup_id,
     new_if->condition = var_remap.empty()
                             ? if_node->condition
                             : Substitute(if_node->condition, var_remap);
+    new_if->condition = apply_buffer_remap_expr(new_if->condition);
     if (if_node->task) {
       auto cloned_task =
           std::static_pointer_cast<TaskNode>(if_node->task->Clone());
@@ -325,13 +504,14 @@ CloneIRStructureWithWarpgroupFilter(IRStructure *node, int warpgroup_id,
           cloned_task->stmts[i] = Substitute(cloned_task->stmts[i], var_remap);
         }
       }
+      apply_buffer_remap_task(cloned_task.get());
       new_if->task = std::move(cloned_task);
     }
     new_if->then_child = CloneIRStructureWithWarpgroupFilter(
-        if_node->then_child.get(), warpgroup_id, var_remap);
+        if_node->then_child.get(), warpgroup_id, var_remap, buffer_remap);
     if (if_node->else_child) {
       new_if->else_child = CloneIRStructureWithWarpgroupFilter(
-          if_node->else_child.get(), warpgroup_id, var_remap);
+          if_node->else_child.get(), warpgroup_id, var_remap, buffer_remap);
     }
     // Return nullptr if both branches are empty
     if (!new_if->then_child && !new_if->else_child)
@@ -342,11 +522,20 @@ CloneIRStructureWithWarpgroupFilter(IRStructure *node, int warpgroup_id,
   return nullptr;
 }
 
-// Entry point overload — creates a fresh var_remap per call
+std::shared_ptr<IRStructure>
+CloneIRStructureWithWarpgroupFilter(IRStructure *node, int warpgroup_id,
+                                    Map<Var, PrimExpr> &var_remap) {
+  Map<Buffer, Buffer> buffer_remap;
+  return CloneIRStructureWithWarpgroupFilter(node, warpgroup_id, var_remap,
+                                             buffer_remap);
+}
+
 std::shared_ptr<IRStructure>
 CloneIRStructureWithWarpgroupFilter(IRStructure *node, int warpgroup_id) {
   Map<Var, PrimExpr> var_remap;
-  return CloneIRStructureWithWarpgroupFilter(node, warpgroup_id, var_remap);
+  Map<Buffer, Buffer> buffer_remap;
+  return CloneIRStructureWithWarpgroupFilter(node, warpgroup_id, var_remap,
+                                             buffer_remap);
 }
 
 // For each child of a root SequenceNode, apply
@@ -354,14 +543,24 @@ CloneIRStructureWithWarpgroupFilter(IRStructure *node, int warpgroup_id) {
 std::vector<std::shared_ptr<IRStructure>>
 CloneIRStructureChildrenWithWarpgroupFilter(SequenceNode *root_seq,
                                             int warpgroup_id,
-                                            Map<Var, PrimExpr> &var_remap) {
+                                            Map<Var, PrimExpr> &var_remap,
+                                            Map<Buffer, Buffer> &buffer_remap) {
   std::vector<std::shared_ptr<IRStructure>> result;
   result.reserve(root_seq->children.size());
   for (const auto &child : root_seq->children) {
     result.push_back(CloneIRStructureWithWarpgroupFilter(
-        child.get(), warpgroup_id, var_remap));
+        child.get(), warpgroup_id, var_remap, buffer_remap));
   }
   return result;
+}
+
+std::vector<std::shared_ptr<IRStructure>>
+CloneIRStructureChildrenWithWarpgroupFilter(SequenceNode *root_seq,
+                                            int warpgroup_id,
+                                            Map<Var, PrimExpr> &var_remap) {
+  Map<Buffer, Buffer> buffer_remap;
+  return CloneIRStructureChildrenWithWarpgroupFilter(root_seq, warpgroup_id,
+                                                     var_remap, buffer_remap);
 }
 
 std::shared_ptr<IRStructure>
@@ -834,7 +1033,8 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
     IRStructure *root, IterVar thread_var, std::vector<Buffer> &barrier_buffers,
     Map<ObjectRef, ObjectRef> &barrier_map, const bool outer_enable_epi,
     const std::vector<PrimExpr> &thread_count,
-    const WarpSpecializeConfig &config, Buffer neutral_sync_shared_barrier) {
+    const WarpSpecializeConfig &config, Buffer neutral_sync_shared_barrier,
+    std::vector<Buffer> &duplicated_fragment_buffers) {
   if (!root)
     return Evaluate(0);
 
@@ -844,7 +1044,8 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
     if (wrapper->child) {
       body = ApplyWarpgroupPartitionToIRStructure(
           wrapper->child.get(), thread_var, barrier_buffers, barrier_map,
-          outer_enable_epi, thread_count, config, neutral_sync_shared_barrier);
+          outer_enable_epi, thread_count, config, neutral_sync_shared_barrier,
+          duplicated_fragment_buffers);
     }
     if (const auto *let = wrapper->wrapper.as<LetStmtNode>()) {
       return LetStmt(let->var, let->value, body);
@@ -927,12 +1128,27 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
   // wg_children[wg_id][child_index] = filtered IRStructure (nullptr if absent)
   std::vector<std::vector<std::shared_ptr<IRStructure>>> wg_children(num_wgs);
   std::vector<std::shared_ptr<IRStructure>> wg_structures(num_wgs);
+
+  std::vector<Buffer> broadcast_fragments =
+      CollectBroadcastFragmentBuffers(root);
+  std::vector<Map<Buffer, Buffer>> per_wg_buffer_remap(num_wgs);
+  if (!broadcast_fragments.empty()) {
+    for (size_t i = 1; i < num_wgs; ++i) {
+      std::string suffix = "_wg" + std::to_string(i);
+      for (const auto &buf : broadcast_fragments) {
+        Buffer new_buf = DuplicateFragmentBuffer(buf, suffix);
+        per_wg_buffer_remap[i].Set(buf, new_buf);
+        duplicated_fragment_buffers.push_back(new_buf);
+      }
+    }
+  }
+
   if (root->IsSequence()) {
     auto root_seq = static_cast<SequenceNode *>(root);
     for (size_t i = 0; i < num_wgs; ++i) {
       Map<Var, PrimExpr> var_remap;
-      wg_children[i] =
-          CloneIRStructureChildrenWithWarpgroupFilter(root_seq, i, var_remap);
+      wg_children[i] = CloneIRStructureChildrenWithWarpgroupFilter(
+          root_seq, i, var_remap, per_wg_buffer_remap[i]);
     }
     for (size_t i = 0; i < num_wgs; ++i) {
       // Rebuild from wg_children: wrap non-null children into a SequenceNode
@@ -946,8 +1162,10 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
   } else {
     // Fallback for non-SequenceNode root: clone entire root per warpgroup
     for (size_t i = 0; i < num_wgs; ++i) {
+      Map<Var, PrimExpr> var_remap;
       wg_structures[i] =
-          RemoveUnusedLetDecls(CloneIRStructureWithWarpgroupFilter(root, i));
+          RemoveUnusedLetDecls(CloneIRStructureWithWarpgroupFilter(
+              root, i, var_remap, per_wg_buffer_remap[i]));
     }
   }
 

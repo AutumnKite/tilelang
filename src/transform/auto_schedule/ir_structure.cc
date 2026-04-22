@@ -274,25 +274,36 @@ void TaskNode::CollectBufferAccessInfo(
   if (GetSchedulePhase() != phase) {
     return;
   }
-  // Collect write buffers
-  for (const auto &region : GetWriteRegions()) {
-    if (wg_id != -1) {
-      result.emplace(region->buffer, true, wg_id, phase);
-    } else {
+
+  // Helper: emit buffer access for a single region.
+  auto emit_access = [&](const BufferRegion &region, bool is_write) {
+    if (wg_id >= 0) {
+      // Normal assigned warpgroup
+      result.emplace(region->buffer, is_write, wg_id, phase);
+    } else if (IsWarpgroupBroadcast(wg_id)) {
+      // Broadcast: skip register memory (each wg has its own copy)
+      if (IsRegisterRegion(region)) {
+        return;
+      }
+      // Shared/global memory is shared across wgs — emit for all
       for (int i = 0; i < num_wgs; ++i) {
-        result.emplace(region->buffer, true, i, phase);
+        result.emplace(region->buffer, is_write, i, phase);
+      }
+    } else {
+      // Unassigned (kWarpgroupUnassigned): expand to all wgs (legacy behavior)
+      for (int i = 0; i < num_wgs; ++i) {
+        result.emplace(region->buffer, is_write, i, phase);
       }
     }
+  };
+
+  // Collect write buffers
+  for (const auto &region : GetWriteRegions()) {
+    emit_access(region, true);
   }
   // Collect read buffers
   for (const auto &region : GetReadRegions()) {
-    if (wg_id != -1) {
-      result.emplace(region->buffer, false, wg_id, phase);
-    } else {
-      for (int i = 0; i < num_wgs; ++i) {
-        result.emplace(region->buffer, false, i, phase);
-      }
-    }
+    emit_access(region, false);
   }
 }
 

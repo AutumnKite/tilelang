@@ -463,8 +463,7 @@ static void RewriteGemmMbar(TaskNode *task, PrimExpr mbar_expr) {
       static const auto wgmma_gemm_op = Op::Get("tl.tileop.wgmma_gemm");
       static const auto tcgen05_gemm_op = Op::Get("tl.tileop.tcgen05_gemm");
 
-      if ((op->op.same_as(gemm_op) ||
-           op->op.same_as(wgmma_gemm_op) ||
+      if ((op->op.same_as(gemm_op) || op->op.same_as(wgmma_gemm_op) ||
            op->op.same_as(tcgen05_gemm_op)) &&
           op->args.size() > 16) {
         Array<PrimExpr> new_args;

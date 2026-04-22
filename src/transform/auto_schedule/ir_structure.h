@@ -38,6 +38,19 @@ enum class SchedulePhase : uint8_t {
   kEpilogue = 2, // Runs on ALL threads AFTER warpgroup-specific code
 };
 
+// Special warpgroup id constants
+constexpr int kWarpgroupUnassigned = -1; // Not yet assigned (initial state)
+constexpr int kWarpgroupBroadcast = -2;  // Broadcast: the statement is cloned
+                                         // into every warp group; each wg
+                                         // operates on its own register copies.
+                                         // No cross-wg sync is needed for
+                                         // register (local.fragment) buffers.
+
+// Helper: check if a warpgroup id represents a broadcast task
+inline bool IsWarpgroupBroadcast(int wg_id) {
+  return wg_id == kWarpgroupBroadcast;
+}
+
 // Structure to store buffer access information
 struct BufferAccessInfo {
   Buffer buffer;
@@ -149,8 +162,8 @@ public:
   // Substitute a variable throughout this IR node
   virtual void SubstituteVar(const Var &old_var, const Var &new_var) = 0;
 
-  // Get warpgroup id for this node (-1 if not applicable)
-  virtual int GetWarpgroupId() const { return -1; }
+  // Get warpgroup id for this node (kWarpgroupUnassigned if not applicable)
+  virtual int GetWarpgroupId() const { return kWarpgroupUnassigned; }
 
   // Get scheduling phase for this node
   virtual SchedulePhase GetSchedulePhase() const {
@@ -356,7 +369,8 @@ public:
                           std::set<BufferAccessInfo> &result) const override;
 
   bool containWarpgroupId(int id) const override {
-    return ContainsLoopBreak() || warpgroup_id_ == id;
+    return ContainsLoopBreak() || IsWarpgroupBroadcast(warpgroup_id_) ||
+           warpgroup_id_ == id;
   }
 
   // Check if this task contains loop_break call
@@ -379,7 +393,7 @@ private:
   int64_t latency_{0}; // Estimated latency in cycles
   int64_t ii_{0};      // Initiation interval in cycles
   int warpgroup_id_{
-      -1}; // Warpgroup id for warpgroup specialization (-1 means unassigned)
+      kWarpgroupUnassigned}; // Warpgroup id for warpgroup specialization
   SchedulePhase schedule_phase_{
       SchedulePhase::kBody}; // Scheduling phase (prologue/body/epilogue)
 

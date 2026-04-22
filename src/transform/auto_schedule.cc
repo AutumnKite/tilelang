@@ -280,6 +280,7 @@ protected:
       auto control_node = std::make_shared<ControlNode>();
       control_node->control = GetRef<For>(op);
       control_node->task = std::make_shared<TaskNode>();
+      control_node->task->SetWarpgroupId(kWarpgroupBroadcast);
       control_node->task->stmts.push_back(
           For(op->loop_var, op->min, op->extent, op->kind, Evaluate(0),
               op->thread_binding, op->annotations, op->step, op->span));
@@ -376,6 +377,7 @@ protected:
     auto wrapper_node = std::make_shared<WrapperNode>();
     wrapper_node->wrapper = GetRef<Stmt>(op);
     auto task_node = std::make_shared<TaskNode>();
+    task_node->SetWarpgroupId(kWarpgroupBroadcast);
     task_node->stmts.push_back(GetLetDecl(op));
     AnalyzeResourceUsage(GetLetDecl(op), task_node.get());
     wrapper_node->task = std::move(task_node);
@@ -394,6 +396,7 @@ protected:
     auto wrapper_node = std::make_shared<WrapperNode>();
     wrapper_node->wrapper = GetRef<Stmt>(op);
     auto task_node = std::make_shared<TaskNode>();
+    task_node->SetWarpgroupId(kWarpgroupBroadcast);
     task_node->stmts.push_back(GetAttrDecl(op));
     AnalyzeResourceUsage(GetAttrDecl(op), task_node.get());
     wrapper_node->task = std::move(task_node);
@@ -520,8 +523,7 @@ private:
               }
             }
           }
-        } else if (op->op.same_as(gemm_op) ||
-                   op->op.same_as(wgmma_gemm_op) ||
+        } else if (op->op.same_as(gemm_op) || op->op.same_as(wgmma_gemm_op) ||
                    op->op.same_as(tcgen05_gemm_op)) {
           found_tensor = true;
 
@@ -687,6 +689,7 @@ struct ScheduledKernelResult {
   std::vector<Buffer> barrier_buffers;
   Map<ObjectRef, ObjectRef> barrier_map;
   std::vector<MultiVersionBufferInfo> buffer_infos;
+  std::vector<Buffer> duplicated_fragment_buffers;
   PrimExpr updated_thread_extent;
   bool did_warpgroup_partition{false};
 };
@@ -768,7 +771,7 @@ ScheduleSingleKernel(const Stmt &kernel_body, IterVar thread_var, Target target,
   result.scheduled_body = ApplyWarpgroupPartitionToIRStructure(
       ir_structure.get(), thread_var, result.barrier_buffers,
       result.barrier_map, enable_epi, thread_count, config,
-      neutral_sync_shared_barrier);
+      neutral_sync_shared_barrier, result.duplicated_fragment_buffers);
   result.did_warpgroup_partition = true;
   return result;
 }
@@ -874,8 +877,13 @@ tvm::transform::Pass AutoSchedule(const bool enable_epi) {
           final_body = extent_updater(final_body);
         }
         // Add barrier buffers to tilelang_root block's alloc_buffers
-        if (!kr.barrier_buffers.empty()) {
-          final_body = AddBarrierBuffersToRoot(final_body, kr.barrier_buffers,
+        if (!kr.barrier_buffers.empty() ||
+            !kr.duplicated_fragment_buffers.empty()) {
+          std::vector<Buffer> all_alloc_buffers = kr.barrier_buffers;
+          all_alloc_buffers.insert(all_alloc_buffers.end(),
+                                   kr.duplicated_fragment_buffers.begin(),
+                                   kr.duplicated_fragment_buffers.end());
+          final_body = AddBarrierBuffersToRoot(final_body, all_alloc_buffers,
                                                kr.barrier_map);
         }
         // Apply multi-version alloc_buffer rewrite if needed
@@ -952,9 +960,14 @@ tvm::transform::Pass AutoSchedule(const bool enable_epi) {
           scheduled_subtree = extent_updater(scheduled_subtree);
         }
         // Add barrier buffers to this kernel's tilelang_root block
-        if (!kr.barrier_buffers.empty()) {
+        if (!kr.barrier_buffers.empty() ||
+            !kr.duplicated_fragment_buffers.empty()) {
+          std::vector<Buffer> all_alloc_buffers = kr.barrier_buffers;
+          all_alloc_buffers.insert(all_alloc_buffers.end(),
+                                   kr.duplicated_fragment_buffers.begin(),
+                                   kr.duplicated_fragment_buffers.end());
           scheduled_subtree = AddBarrierBuffersToRoot(
-              scheduled_subtree, kr.barrier_buffers, kr.barrier_map);
+              scheduled_subtree, all_alloc_buffers, kr.barrier_map);
         }
         // Apply multi-version alloc_buffer rewrite if needed
         if (!kr.buffer_infos.empty()) {
