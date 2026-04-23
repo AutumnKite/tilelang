@@ -563,184 +563,33 @@ CloneIRStructureChildrenWithWarpgroupFilter(SequenceNode *root_seq,
                                                      var_remap, buffer_remap);
 }
 
-std::shared_ptr<IRStructure>
-RemoveUnusedLetDecls(std::shared_ptr<IRStructure> root) {
-  if (!root)
-    return nullptr;
+// Post-pass for the finished auto-schedule Stmt: drop any LetStmt whose bound
+// variable is not referenced in its body, provided the bound value expression
+// is pure (no side-effects beyond `kReadState`).
+class UnusedLetStmtStripper : public StmtExprMutator {
+public:
+  Stmt VisitStmt_(const LetStmtNode *op) final {
+    Stmt new_body = this->VisitStmt(op->body);
+    PrimExpr new_value = this->VisitExpr(op->value);
 
-  // Phase 1: Collect LetDecl definitions and variable references from
-  // non-LetDecl nodes (task stmts and ScheduleUnit before/after).
-  struct LetDeclEntry {
-    const VarNode *var;
-    PrimExpr value;
-  };
-  std::vector<LetDeclEntry> let_decls;
-  std::unordered_set<const VarNode *> referenced_vars;
+    auto body_uses_var = UsesVar(new_body, [&](const VarNode *v) {
+      return v == op->var.get();
+    });
+    bool value_is_pure = SideEffect(new_value) <= CallEffectKind::kPure;
 
-  std::function<void(const IRStructure *)> collect =
-      [&](const IRStructure *node) {
-        if (!node)
-          return;
-        if (node->IsTask()) {
-          auto task = static_cast<const TaskNode *>(node);
-          if (IsLetDeclTask(task)) {
-            const auto *let = task->stmts[0].as<LetStmtNode>();
-            let_decls.push_back({let->var.get(), let->value});
-          } else {
-            VarRefCollector collector;
-            for (const auto &stmt : task->stmts) {
-              collector(stmt);
-            }
-            referenced_vars.insert(collector.vars.begin(),
-                                   collector.vars.end());
-          }
-        } else if (node->IsSequence()) {
-          for (const auto &child :
-               static_cast<const SequenceNode *>(node)->children) {
-            collect(child.get());
-          }
-        } else if (node->IsControl()) {
-          auto ctrl = static_cast<const ControlNode *>(node);
-          collect(ctrl->task.get());
-          collect(ctrl->child.get());
-          // Also collect variable references from the For loop bounds
-          // (min, extent, step) so their LetDecls are not removed.
-          VarRefCollector for_collector;
-          for_collector(ctrl->control->min);
-          for_collector(ctrl->control->extent);
-          if (ctrl->control->step.has_value()) {
-            for_collector(ctrl->control->step.value());
-          }
-          referenced_vars.insert(for_collector.vars.begin(),
-                                 for_collector.vars.end());
-        } else if (node->IsWrapper()) {
-          auto wrapper = static_cast<const WrapperNode *>(node);
-          collect(wrapper->task.get());
-          collect(wrapper->child.get());
-          // Also collect variable references from the wrapper statement
-          // (LetStmt value / AttrStmt value) so their LetDecls are not removed.
-          VarRefCollector wrapper_collector;
-          wrapper_collector(wrapper->wrapper);
-          referenced_vars.insert(wrapper_collector.vars.begin(),
-                                 wrapper_collector.vars.end());
-        } else if (node->IsScheduleUnit()) {
-          auto unit = static_cast<const ScheduleUnit *>(node);
-          collect(unit->child.get());
-          VarRefCollector collector;
-          for (const auto &[_, stmts] : unit->before) {
-            for (const auto &s : stmts)
-              collector(s);
-          }
-          for (const auto &[_, stmts] : unit->after) {
-            for (const auto &s : stmts)
-              collector(s);
-          }
-          referenced_vars.insert(collector.vars.begin(), collector.vars.end());
-        } else if (node->IsIf()) {
-          auto if_node = static_cast<const IfNode *>(node);
-          collect(if_node->task.get());
-          collect(if_node->then_child.get());
-          if (if_node->else_child) {
-            collect(if_node->else_child.get());
-          }
-          // Collect variable references from the condition
-          VarRefCollector cond_collector;
-          cond_collector(if_node->condition);
-          referenced_vars.insert(cond_collector.vars.begin(),
-                                 cond_collector.vars.end());
-        }
-      };
-  collect(root.get());
-
-  // Phase 2: Transitive closure — if a LetDecl var is referenced,
-  // all vars in its value expression are transitively referenced too.
-  bool changed = true;
-  while (changed) {
-    changed = false;
-    for (const auto &entry : let_decls) {
-      if (referenced_vars.count(entry.var)) {
-        VarRefCollector collector;
-        collector(entry.value);
-        for (const auto *v : collector.vars) {
-          if (!referenced_vars.count(v)) {
-            referenced_vars.insert(v);
-            changed = true;
-          }
-        }
-      }
+    if (!body_uses_var && value_is_pure) {
+      return new_body;
     }
+    if (new_body.same_as(op->body) && new_value.same_as(op->value)) {
+      return GetRef<Stmt>(op);
+    }
+    return LetStmt(op->var, new_value, new_body, op->span);
   }
+};
 
-  // Phase 3: Filter the tree — remove LetDecl tasks for unused vars.
-  std::function<std::shared_ptr<IRStructure>(
-      const std::shared_ptr<IRStructure> &)>
-      filter_tree = [&](const std::shared_ptr<IRStructure> &node)
-      -> std::shared_ptr<IRStructure> {
-    if (!node)
-      return nullptr;
-    if (node->IsTask()) {
-      if (IsLetDeclTask(static_cast<const TaskNode *>(node.get()))) {
-        const auto *let = static_cast<const TaskNode *>(node.get())
-                              ->stmts[0]
-                              .as<LetStmtNode>();
-        if (!referenced_vars.count(let->var.get())) {
-          return nullptr; // Remove unused LetDecl
-        }
-      }
-      return node;
-    } else if (node->IsSequence()) {
-      auto seq = static_cast<const SequenceNode *>(node.get());
-      auto new_seq = std::make_shared<SequenceNode>();
-      for (const auto &child : seq->children) {
-        auto filtered = filter_tree(child);
-        if (filtered)
-          new_seq->children.push_back(std::move(filtered));
-      }
-      if (new_seq->children.empty())
-        return nullptr;
-      return new_seq;
-    } else if (node->IsControl()) {
-      auto ctrl = static_cast<const ControlNode *>(node.get());
-      auto new_ctrl = std::make_shared<ControlNode>();
-      new_ctrl->control = ctrl->control;
-      new_ctrl->task = ctrl->task;
-      new_ctrl->SetPromote(ctrl->hasPromote());
-      new_ctrl->child = filter_tree(ctrl->child);
-      if (!new_ctrl->child)
-        return nullptr;
-      return new_ctrl;
-    } else if (node->IsWrapper()) {
-      auto wrapper = static_cast<const WrapperNode *>(node.get());
-      auto new_wrapper = std::make_shared<WrapperNode>();
-      new_wrapper->wrapper = wrapper->wrapper;
-      new_wrapper->task = wrapper->task;
-      new_wrapper->child = filter_tree(wrapper->child);
-      return new_wrapper;
-    } else if (node->IsScheduleUnit()) {
-      auto unit = static_cast<const ScheduleUnit *>(node.get());
-      auto new_unit = std::make_shared<ScheduleUnit>();
-      new_unit->stage = unit->stage;
-      new_unit->before = unit->before;
-      new_unit->after = unit->after;
-      new_unit->child = filter_tree(unit->child);
-      if (!new_unit->child)
-        return nullptr;
-      return new_unit;
-    } else if (node->IsIf()) {
-      auto if_node = static_cast<const IfNode *>(node.get());
-      auto new_if = std::make_shared<IfNode>();
-      new_if->condition = if_node->condition;
-      new_if->task = if_node->task;
-      new_if->then_child = filter_tree(if_node->then_child);
-      if (if_node->else_child) {
-        new_if->else_child = filter_tree(if_node->else_child);
-      }
-      return new_if;
-    }
-    return node;
-  };
-
-  return filter_tree(root);
+Stmt StripUnusedLetStmts(const Stmt &stmt) {
+  UnusedLetStmtStripper stripper;
+  return stripper(stmt);
 }
 
 class SimtCopyDetector : public StmtExprVisitor {
@@ -762,6 +611,44 @@ private:
   }
 
   bool has_simt_copy_{false};
+};
+
+// Detects whether `stmt` already carries any of the signals that downstream
+// AnnotateWarpGroupRegAlloc (see src/transform/annotate_warp_group_reg_alloc.cc
+// SetMaxNRegCollector) treats as "caller already decided register allocation".
+// If any of these signals is present, the auto-schedule warp-group partitioner
+// must skip its own (240/24-style) set_max_nreg injection so the inner choice
+// is preserved.  The three honored signals are:
+//   1. an explicit tl::set_max_nreg() call,
+//   2. an explicit tl::no_set_max_nreg() opt-out sentinel,
+//   3. an AttrStmt with key attr::kCustomWarpSpecialization.
+class InnerNRegDecisionDetector : public StmtExprVisitor {
+public:
+  static bool Detect(const Stmt &stmt) {
+    InnerNRegDecisionDetector detector;
+    detector.VisitStmt(stmt);
+    return detector.has_decision_;
+  }
+
+private:
+  void VisitStmt_(const EvaluateNode *op) final {
+    if (const CallNode *call = op->value.as<CallNode>()) {
+      if (call->op.same_as(tl::set_max_nreg()) ||
+          call->op.same_as(tl::no_set_max_nreg())) {
+        has_decision_ = true;
+      }
+    }
+    StmtExprVisitor::VisitStmt_(op);
+  }
+
+  void VisitStmt_(const AttrStmtNode *op) final {
+    if (op->attr_key == attr::kCustomWarpSpecialization) {
+      has_decision_ = true;
+    }
+    StmtExprVisitor::VisitStmt_(op);
+  }
+
+  bool has_decision_{false};
 };
 
 Stmt ConvertIRStructureToStmt(IRStructure *structure,
@@ -1160,12 +1047,11 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
       wg_structures[i] = rebuilt_seq->children.empty() ? nullptr : rebuilt_seq;
     }
   } else {
-    // Fallback for non-SequenceNode root: clone entire root per warpgroup
+    // Fallback for non-SequenceNode root: clone entire root per warpgroup.
     for (size_t i = 0; i < num_wgs; ++i) {
       Map<Var, PrimExpr> var_remap;
-      wg_structures[i] =
-          RemoveUnusedLetDecls(CloneIRStructureWithWarpgroupFilter(
-              root, i, var_remap, per_wg_buffer_remap[i]));
+      wg_structures[i] = CloneIRStructureWithWarpgroupFilter(
+          root, i, var_remap, per_wg_buffer_remap[i]);
     }
   }
 
@@ -1210,6 +1096,22 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
     Stmt full_wg1 =
         ConvertIRStructureToStmt(wg_structures[1].get(), outer_enable_epi);
     has_simt_copy = SimtCopyDetector::Detect(full_wg1);
+  }
+
+  // Check whether any inner pass already decided register allocation.
+  bool has_inner_nreg_decision = false;
+  if (num_wgs == 2 && config.enable_set_max_nreg) {
+    for (size_t i = 0; i < num_wgs; ++i) {
+      if (!wg_structures[i]) {
+        continue;
+      }
+      Stmt full_wg =
+          ConvertIRStructureToStmt(wg_structures[i].get(), outer_enable_epi);
+      if (InnerNRegDecisionDetector::Detect(full_wg)) {
+        has_inner_nreg_decision = true;
+        break;
+      }
+    }
   }
 
   // --- Per-child construction ---
@@ -1289,8 +1191,8 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
           Integer(0), attr::kAutoScheduleSharedMemoryBoundary, 0, Evaluate(0)));
 
       // Prepend set_max_nreg only to the first non-LetDecl child
-      if (first_non_let && !has_simt_copy && num_wgs == 2 &&
-          config.enable_set_max_nreg) {
+      if (first_non_let && !has_simt_copy && !has_inner_nreg_decision &&
+          num_wgs == 2 && config.enable_set_max_nreg) {
         for (size_t i = 0; i < num_wgs; ++i) {
           wg_stmts[i] =
               SeqStmt({Evaluate(Call(DataType::Handle(), tl::set_max_nreg(),
@@ -1319,7 +1221,8 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
         wg_stmts[i] = Evaluate(0);
       }
     }
-    if (!has_simt_copy && num_wgs == 2 && config.enable_set_max_nreg) {
+    if (!has_simt_copy && !has_inner_nreg_decision && num_wgs == 2 &&
+        config.enable_set_max_nreg) {
       for (size_t i = 0; i < num_wgs; ++i) {
         wg_stmts[i] =
             SeqStmt({Evaluate(Call(DataType::Handle(), tl::set_max_nreg(),
