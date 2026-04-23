@@ -748,7 +748,11 @@ AssignWarpgroupIdsGlobal(IRStructure *root, const WarpSpecializeConfig &config,
 
   int64_t max_latency = std::max(warpgroup0_latency, warpgroup1_latency);
   int64_t min_latency = std::min(warpgroup0_latency, warpgroup1_latency);
-  if ((double)max_latency < 1.1 * min_latency) {
+  bool double_thread = (double)max_latency < 1.1 * min_latency;
+  if (auto thread_count_num = as_const_int(thread_count)) {
+    double_thread &= *thread_count_num <= 128;
+  }
+  if (double_thread) {
     int64_t warpgroup0_latency = 0;
     int64_t warpgroup1_latency = 0;
 
