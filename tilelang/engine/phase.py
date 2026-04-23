@@ -28,6 +28,64 @@ def module_has_tma(mod: IRModule) -> bool:
     return any(func.attrs and func.attrs.get("tl.has_tma", False) for _, func in mod.functions.items())
 
 
+def module_uses_thread_var(mod: IRModule) -> bool:
+    """Check whether any PrimFunc in ``mod`` references thread-index variables
+    inside its body.
+    """
+    from tvm.tir import stmt_functor
+
+    for _, func in mod.functions.items():
+        if not isinstance(func, tir.PrimFunc):
+            continue
+
+        thread_extent_vars: set = set()
+        explicit_thread_binding_loop: list[bool] = [False]
+
+        def _collect(node):
+            if isinstance(node, tir.AttrStmt) and node.attr_key == "thread_extent":
+                iter_var = node.node
+                if isinstance(iter_var, tir.IterVar):
+                    tag = getattr(iter_var, "thread_tag", "") or ""
+                    if tag.startswith("threadIdx."):
+                        thread_extent_vars.add(iter_var.var)
+            elif isinstance(node, tir.For) and node.kind == tir.ForKind.THREAD_BINDING:
+                tb = node.thread_binding
+                tag = getattr(tb, "thread_tag", "") if tb is not None else ""
+                if isinstance(tag, str) and tag.startswith("threadIdx."):
+                    explicit_thread_binding_loop[0] = True
+
+        stmt_functor.post_order_visit(func.body, _collect)
+
+        if explicit_thread_binding_loop[0]:
+            return True
+
+        if not thread_extent_vars:
+            continue
+
+        uses_thread_var = [False]
+
+        def _find_use(node):
+            if uses_thread_var[0]:
+                return
+            if isinstance(node, tir.Var) and node in thread_extent_vars:
+                uses_thread_var[0] = True
+
+        def _walk(stmt):
+            if uses_thread_var[0]:
+                return
+            if isinstance(stmt, tir.AttrStmt) and stmt.attr_key == "thread_extent":
+                _walk(stmt.body)
+                return
+            stmt_functor.post_order_visit(stmt, _find_use)
+
+        _walk(func.body)
+
+        if uses_thread_var[0]:
+            return True
+
+    return False
+
+
 def allow_vectorize(pass_ctx: PassContext | None = None) -> bool:
     if pass_ctx is None:
         pass_ctx = tilelang.transform.get_pass_context()
@@ -184,7 +242,7 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.InjectAssumes()(mod)
     # Simplify the IR expressions
     mod = tilelang.transform.Simplify()(mod)
-    if allow_autoschedule(target=target):
+    if allow_autoschedule(target=target) and not module_uses_thread_var(mod):
         # Auto schedule for high-level operations
         mod = tilelang.transform.IfConditionExtract()(mod)
         mod = tilelang.transform.AutoSchedule(False)(mod)
