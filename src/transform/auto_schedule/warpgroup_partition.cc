@@ -1185,9 +1185,38 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
       if (all_empty)
         continue;
 
+      auto PeelLetsToInner = [](const Stmt &s) -> Stmt {
+        const Stmt *cur = &s;
+        while (const auto *let = cur->as<LetStmtNode>()) {
+          cur = &let->body;
+        }
+        return *cur;
+      };
+      bool is_shared_attr_segment = true;
+      Stmt shared_attr_stmt;
+      for (size_t i = 0; i < num_wgs; ++i) {
+        if (IsEvaluateZero(wg_stmts[i])) {
+          continue;
+        }
+        Stmt inner = PeelLetsToInner(wg_stmts[i]);
+        const auto *attr = inner.as<AttrStmtNode>();
+        if (!attr || !IsEvaluateZero(attr->body)) {
+          is_shared_attr_segment = false;
+          break;
+        }
+        if (!shared_attr_stmt.defined()) {
+          shared_attr_stmt = wg_stmts[i];
+        }
+      }
+
       // Insert liveness boundary before each non-empty non-LetDecl child
       segmented_stmts.push_back(AttrStmt(
           Integer(0), attr::kAutoScheduleSharedMemoryBoundary, 0, Evaluate(0)));
+
+      if (is_shared_attr_segment && shared_attr_stmt.defined()) {
+        segmented_stmts.push_back(shared_attr_stmt);
+        continue;
+      }
 
       // Prepend set_max_nreg only to the first non-LetDecl child
       if (first_non_let && !has_simt_copy && !has_inner_nreg_decision &&

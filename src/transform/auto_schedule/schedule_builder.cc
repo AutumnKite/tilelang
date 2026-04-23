@@ -1120,6 +1120,16 @@ void ScheduleUnitBuilder::NaiveScheduleLoop(ControlNode *ctrl) {
            task->stmts[0].as<LetStmtNode>() != nullptr;
   };
   auto SolveConflictVar = [&]() -> bool {
+    auto HasVarRawDep = [](const IRStructure *producer,
+                           const IRStructure *consumer) -> bool {
+      for (const auto &w : producer->GetWriteVars()) {
+        for (const auto &r : consumer->GetReadVars()) {
+          if (SameVar(w, r))
+            return true;
+        }
+      }
+      return false;
+    };
     for (int i = 0; i < n; ++i) {
       if (!IsVarDecl(seq_body->children[i].get()))
         continue;
@@ -1128,7 +1138,7 @@ void ScheduleUnitBuilder::NaiveScheduleLoop(ControlNode *ctrl) {
           continue;
         auto node_i = seq_body->children[i].get();
         auto node_j = seq_body->children[j].get();
-        if (!HasDependency(node_i, node_j))
+        if (!HasVarRawDep(node_i, node_j))
           continue;
         if (stage_map[node_j] == stage_map[node_i])
           continue;
@@ -1165,7 +1175,7 @@ void ScheduleUnitBuilder::NaiveScheduleLoop(ControlNode *ctrl) {
           auto node_k = seq_body->children[k].get();
           if (rem_stage_j != stage_map[node_k])
             continue;
-          if (HasDependency(node_i, node_k)) {
+          if (HasVarRawDep(node_i, node_k)) {
             node_k->SubstituteVar(node_i_let_stmt->var, cloned_let_stmt->var);
             stage_map[node_k] = rem_stage_j;
           }
