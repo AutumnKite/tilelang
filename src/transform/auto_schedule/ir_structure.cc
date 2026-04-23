@@ -537,5 +537,419 @@ void CollectAllTaskNodesWithContext(IRStructure *node,
   }
 }
 
+// ============================================================================
+// CollectFirstAccessTasks / CollectLastAccessTasks implementations
+//
+// These methods return the set of TaskNode pointers that could possibly be the
+// first (or last) to perform a specific buffer access (buffer, is_write, wg_id)
+// within the IR subtree.  The bool return value indicates whether the subtree
+// is *guaranteed* to contain at least one matching access (must_have).
+// ============================================================================
+
+static const IfNode *TryGetIfNode(const IRStructure *node) {
+  if (!node)
+    return nullptr;
+  if (node->IsIf())
+    return static_cast<const IfNode *>(node);
+  if (node->IsScheduleUnit()) {
+    auto *unit = static_cast<const ScheduleUnit *>(node);
+    if (unit->child && unit->child->IsIf())
+      return static_cast<const IfNode *>(unit->child.get());
+  }
+  return nullptr;
+}
+
+static bool
+SequenceCollectFirstAccessTasks(const std::vector<const IRStructure *> &nodes,
+                                const Buffer &buffer, bool is_write, int wg_id,
+                                SchedulePhase phase,
+                                std::set<const TaskNode *> &result) {
+  int n = static_cast<int>(nodes.size());
+
+  // Find the first node that contains loop_break.
+  int break_idx = -1;
+  for (int j = 0; j < n; ++j) {
+    if (nodes[j]->ContainsLoopBreak()) {
+      break_idx = j;
+      break;
+    }
+  }
+  if (break_idx >= 0) {
+    if (break_idx > 0) {
+      std::vector<const IRStructure *> before(nodes.begin(),
+                                              nodes.begin() + break_idx);
+      if (SequenceCollectFirstAccessTasks(before, buffer, is_write, wg_id,
+                                          phase, result))
+        return true;
+    }
+    if (nodes[break_idx]->CollectFirstAccessTasks(buffer, is_write, wg_id,
+                                                  phase, result))
+      return true;
+    if (break_idx + 1 < n) {
+      std::vector<const IRStructure *> after(nodes.begin() + break_idx + 1,
+                                             nodes.end());
+      SequenceCollectFirstAccessTasks(after, buffer, is_write, wg_id, phase,
+                                      result);
+    }
+    return false;
+  }
+
+  // No loop_break
+  int i = 0;
+  while (i < n) {
+    const IfNode *if_node = TryGetIfNode(nodes[i]);
+    if (if_node) {
+      int group_start = i;
+      while (i + 1 < n) {
+        const IfNode *next_if = TryGetIfNode(nodes[i + 1]);
+        if (!next_if)
+          break;
+        if (!StructuralEqual()(if_node->condition, next_if->condition))
+          break;
+        ++i;
+      }
+      int group_end = i;
+      ++i;
+      if (if_node->task) {
+        if (if_node->task->CollectFirstAccessTasks(buffer, is_write, wg_id,
+                                                   phase, result))
+          return true;
+      }
+      std::vector<const IRStructure *> then_children, else_children;
+      for (int j = group_start; j <= group_end; ++j) {
+        const IfNode *cur_if = TryGetIfNode(nodes[j]);
+        ICHECK(cur_if);
+        if (cur_if->then_child)
+          then_children.push_back(cur_if->then_child.get());
+        if (cur_if->else_child)
+          else_children.push_back(cur_if->else_child.get());
+      }
+      bool then_must = false, else_must = false;
+      if (!then_children.empty())
+        then_must = SequenceCollectFirstAccessTasks(
+            then_children, buffer, is_write, wg_id, phase, result);
+      if (!else_children.empty())
+        else_must = SequenceCollectFirstAccessTasks(
+            else_children, buffer, is_write, wg_id, phase, result);
+      if (then_must && else_must)
+        return true;
+    } else {
+      if (nodes[i]->CollectFirstAccessTasks(buffer, is_write, wg_id, phase,
+                                            result))
+        return true;
+      ++i;
+    }
+  }
+  return false;
+}
+
+static bool
+SequenceCollectLastAccessTasks(const std::vector<const IRStructure *> &nodes,
+                               const Buffer &buffer, bool is_write, int wg_id,
+                               SchedulePhase phase,
+                               std::set<const TaskNode *> &result) {
+  int n = static_cast<int>(nodes.size());
+
+  // Find the last node that contains loop_break.
+  int break_idx = -1;
+  for (int j = n - 1; j >= 0; --j) {
+    if (nodes[j]->ContainsLoopBreak()) {
+      break_idx = j;
+      break;
+    }
+  }
+  if (break_idx >= 0) {
+    if (break_idx + 1 < n) {
+      std::vector<const IRStructure *> after(nodes.begin() + break_idx + 1,
+                                             nodes.end());
+      SequenceCollectLastAccessTasks(after, buffer, is_write, wg_id, phase,
+                                     result);
+    }
+    nodes[break_idx]->CollectLastAccessTasks(buffer, is_write, wg_id, phase,
+                                             result);
+    if (break_idx > 0) {
+      std::vector<const IRStructure *> before(nodes.begin(),
+                                              nodes.begin() + break_idx);
+      SequenceCollectLastAccessTasks(before, buffer, is_write, wg_id, phase,
+                                     result);
+    }
+    return false;
+  }
+
+  // No loop_break
+  int i = n - 1;
+  while (i >= 0) {
+    const IfNode *if_node = TryGetIfNode(nodes[i]);
+    if (if_node) {
+      int group_end = i;
+      while (i - 1 >= 0) {
+        const IfNode *prev_if = TryGetIfNode(nodes[i - 1]);
+        if (!prev_if)
+          break;
+        if (!StructuralEqual()(if_node->condition, prev_if->condition))
+          break;
+        --i;
+      }
+      int group_start = i;
+      --i;
+      std::vector<const IRStructure *> then_children, else_children;
+      for (int j = group_start; j <= group_end; ++j) {
+        const IfNode *cur_if = TryGetIfNode(nodes[j]);
+        ICHECK(cur_if);
+        if (cur_if->then_child)
+          then_children.push_back(cur_if->then_child.get());
+        if (cur_if->else_child)
+          else_children.push_back(cur_if->else_child.get());
+      }
+      bool then_must = false, else_must = false;
+      if (!then_children.empty())
+        then_must = SequenceCollectLastAccessTasks(
+            then_children, buffer, is_write, wg_id, phase, result);
+      if (!else_children.empty())
+        else_must = SequenceCollectLastAccessTasks(
+            else_children, buffer, is_write, wg_id, phase, result);
+      if (then_must && else_must)
+        return true;
+      const IfNode *last_if = TryGetIfNode(nodes[group_end]);
+      ICHECK(last_if);
+      if (last_if->task) {
+        if (last_if->task->CollectLastAccessTasks(buffer, is_write, wg_id,
+                                                  phase, result))
+          return true;
+      }
+    } else {
+      if (nodes[i]->CollectLastAccessTasks(buffer, is_write, wg_id, phase,
+                                           result))
+        return true;
+      --i;
+    }
+  }
+  return false;
+}
+
+static bool TaskMatchesAccess(const TaskNode *task, const Buffer &buffer,
+                              bool is_write, int wg_id, SchedulePhase phase) {
+  if (task->GetSchedulePhase() != phase)
+    return false;
+  int task_wg = task->GetWarpgroupId();
+  const auto &regions =
+      is_write ? task->GetWriteRegions() : task->GetReadRegions();
+  for (const auto &region : regions) {
+    if (region->buffer == buffer &&
+        (task_wg == wg_id || IsWarpgroupBroadcast(task_wg)))
+      return true;
+  }
+  return false;
+}
+
+bool TaskNode::CollectFirstAccessTasks(
+    const Buffer &buffer, bool is_write, int wg_id, SchedulePhase phase,
+    std::set<const TaskNode *> &result) const {
+  if (TaskMatchesAccess(this, buffer, is_write, wg_id, phase)) {
+    result.insert(this);
+    return true;
+  }
+  return false;
+}
+
+bool TaskNode::CollectLastAccessTasks(
+    const Buffer &buffer, bool is_write, int wg_id, SchedulePhase phase,
+    std::set<const TaskNode *> &result) const {
+  if (TaskMatchesAccess(this, buffer, is_write, wg_id, phase)) {
+    result.insert(this);
+    return true;
+  }
+  return false;
+}
+
+bool ScheduleUnit::CollectFirstAccessTasks(
+    const Buffer &buffer, bool is_write, int wg_id, SchedulePhase phase,
+    std::set<const TaskNode *> &result) const {
+  if (child)
+    return child->CollectFirstAccessTasks(buffer, is_write, wg_id, phase,
+                                          result);
+  return false;
+}
+
+bool ScheduleUnit::CollectLastAccessTasks(
+    const Buffer &buffer, bool is_write, int wg_id, SchedulePhase phase,
+    std::set<const TaskNode *> &result) const {
+  if (child)
+    return child->CollectLastAccessTasks(buffer, is_write, wg_id, phase,
+                                         result);
+  return false;
+}
+
+bool WrapperNode::CollectFirstAccessTasks(
+    const Buffer &buffer, bool is_write, int wg_id, SchedulePhase phase,
+    std::set<const TaskNode *> &result) const {
+  if (task) {
+    if (task->CollectFirstAccessTasks(buffer, is_write, wg_id, phase, result))
+      return true;
+  }
+  if (child) {
+    if (child->CollectFirstAccessTasks(buffer, is_write, wg_id, phase, result))
+      return true;
+  }
+  return false;
+}
+
+bool WrapperNode::CollectLastAccessTasks(
+    const Buffer &buffer, bool is_write, int wg_id, SchedulePhase phase,
+    std::set<const TaskNode *> &result) const {
+  if (child) {
+    if (child->CollectLastAccessTasks(buffer, is_write, wg_id, phase, result))
+      return true;
+  }
+  if (task) {
+    if (task->CollectLastAccessTasks(buffer, is_write, wg_id, phase, result))
+      return true;
+  }
+  return false;
+}
+
+bool IfNode::CollectFirstAccessTasks(const Buffer &buffer, bool is_write,
+                                     int wg_id, SchedulePhase phase,
+                                     std::set<const TaskNode *> &result) const {
+  if (task) {
+    if (task->CollectFirstAccessTasks(buffer, is_write, wg_id, phase, result))
+      return true;
+  }
+  bool then_must = false, else_must = false;
+  if (then_child)
+    then_must = then_child->CollectFirstAccessTasks(buffer, is_write, wg_id,
+                                                    phase, result);
+  if (else_child)
+    else_must = else_child->CollectFirstAccessTasks(buffer, is_write, wg_id,
+                                                    phase, result);
+  return then_must && else_must;
+}
+
+bool IfNode::CollectLastAccessTasks(const Buffer &buffer, bool is_write,
+                                    int wg_id, SchedulePhase phase,
+                                    std::set<const TaskNode *> &result) const {
+  bool then_must = false, else_must = false;
+  if (then_child)
+    then_must = then_child->CollectLastAccessTasks(buffer, is_write, wg_id,
+                                                   phase, result);
+  if (else_child)
+    else_must = else_child->CollectLastAccessTasks(buffer, is_write, wg_id,
+                                                   phase, result);
+  if (then_must && else_must)
+    return true;
+  if (task) {
+    if (task->CollectLastAccessTasks(buffer, is_write, wg_id, phase, result))
+      return true;
+  }
+  return false;
+}
+
+static bool LoopMustExecute(const ControlNode *ctrl) {
+  if (!ctrl->control.defined())
+    return false;
+  const ForNode *for_node = ctrl->control.get();
+  const int64_t *extent_ptr = as_const_int(for_node->extent);
+  if (extent_ptr && *extent_ptr >= 1) {
+    if (for_node->step.has_value()) {
+      const int64_t *step_ptr = as_const_int(for_node->step.value());
+      if (step_ptr && *step_ptr >= 1)
+        return true;
+      if (!step_ptr)
+        return false;
+    } else {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool ControlNode::CollectFirstAccessTasks(
+    const Buffer &buffer, bool is_write, int wg_id, SchedulePhase phase,
+    std::set<const TaskNode *> &result) const {
+  if (task) {
+    if (task->CollectFirstAccessTasks(buffer, is_write, wg_id, phase, result))
+      return true;
+  }
+  bool body_must = false;
+  if (child && child->IsSequence()) {
+    auto *seq = static_cast<const SequenceNode *>(child.get());
+    std::vector<const IRStructure *> ordered;
+    ordered.reserve(seq->children.size());
+    for (const auto &c : seq->children)
+      ordered.push_back(c.get());
+    std::stable_sort(ordered.begin(), ordered.end(),
+                     [](const IRStructure *a, const IRStructure *b) {
+                       auto *ua = dynamic_cast<const ScheduleUnit *>(a);
+                       auto *ub = dynamic_cast<const ScheduleUnit *>(b);
+                       if (ua && ub)
+                         return ua->stage > ub->stage;
+                       return false;
+                     });
+    body_must = SequenceCollectFirstAccessTasks(ordered, buffer, is_write,
+                                                wg_id, phase, result);
+  } else if (child) {
+    body_must =
+        child->CollectFirstAccessTasks(buffer, is_write, wg_id, phase, result);
+  }
+  if (body_must && LoopMustExecute(this))
+    return true;
+  return false;
+}
+
+bool ControlNode::CollectLastAccessTasks(
+    const Buffer &buffer, bool is_write, int wg_id, SchedulePhase phase,
+    std::set<const TaskNode *> &result) const {
+  bool body_must = false;
+  if (child && child->IsSequence()) {
+    auto *seq = static_cast<const SequenceNode *>(child.get());
+    std::vector<const IRStructure *> ordered;
+    ordered.reserve(seq->children.size());
+    for (const auto &c : seq->children)
+      ordered.push_back(c.get());
+    std::stable_sort(ordered.begin(), ordered.end(),
+                     [](const IRStructure *a, const IRStructure *b) {
+                       auto *ua = dynamic_cast<const ScheduleUnit *>(a);
+                       auto *ub = dynamic_cast<const ScheduleUnit *>(b);
+                       if (ua && ub)
+                         return ua->stage > ub->stage;
+                       return false;
+                     });
+    body_must = SequenceCollectLastAccessTasks(ordered, buffer, is_write, wg_id,
+                                               phase, result);
+  } else if (child) {
+    body_must =
+        child->CollectLastAccessTasks(buffer, is_write, wg_id, phase, result);
+  }
+  if (body_must && LoopMustExecute(this))
+    return true;
+  if (task) {
+    if (task->CollectLastAccessTasks(buffer, is_write, wg_id, phase, result))
+      return true;
+  }
+  return false;
+}
+
+bool SequenceNode::CollectFirstAccessTasks(
+    const Buffer &buffer, bool is_write, int wg_id, SchedulePhase phase,
+    std::set<const TaskNode *> &result) const {
+  std::vector<const IRStructure *> ordered;
+  ordered.reserve(children.size());
+  for (const auto &c : children)
+    ordered.push_back(c.get());
+  return SequenceCollectFirstAccessTasks(ordered, buffer, is_write, wg_id,
+                                         phase, result);
+}
+
+bool SequenceNode::CollectLastAccessTasks(
+    const Buffer &buffer, bool is_write, int wg_id, SchedulePhase phase,
+    std::set<const TaskNode *> &result) const {
+  std::vector<const IRStructure *> ordered;
+  ordered.reserve(children.size());
+  for (const auto &c : children)
+    ordered.push_back(c.get());
+  return SequenceCollectLastAccessTasks(ordered, buffer, is_write, wg_id, phase,
+                                        result);
+}
+
 } // namespace tl
 } // namespace tvm

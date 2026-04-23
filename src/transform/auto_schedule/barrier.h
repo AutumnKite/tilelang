@@ -640,73 +640,95 @@ GetSyncInfos(const std::vector<ScheduleUnit *> &units, int num_wgs,
     std::vector<ScheduleUnit *> last_read_unit(num_wgs, nullptr);
     std::vector<std::set<const TaskNode *>> last_read_unit_tasks(num_wgs);
     ScheduleUnit *last_write_unit = nullptr;
-    std::set<const TaskNode *> last_write_unit_tasks;
-    int last_write_wg_id = -1;
+    std::vector<std::pair<int, std::set<const TaskNode *>>>
+        last_write_unit_wg_tasks;
     std::vector<bool> waited_write_wgs(num_wgs, false);
     for (int iter = 0; iter < (is_loop ? 2 : 1); ++iter) {
       for (ScheduleUnit *unit : units) {
+        // Add dependencies for RAW and WAR between this unit and the last
+        // writer/reader units
+        for (int wg_id = 0; wg_id < num_wgs; ++wg_id) {
+          int distance = iter ? num_versions : 0;
+          // RAW: unit reads buffer, wait for last writer
+          auto first_reads = unit->GetFirstAccessTasks(
+              buffer, /*is_write=*/false, wg_id, SchedulePhase::kBody);
+          if (!first_reads.empty() && last_write_unit != nullptr &&
+              !waited_write_wgs[wg_id]) {
+            for (auto *consumer : first_reads) {
+              for (const auto &[last_write_wg_id, last_write_unit_tasks] :
+                   last_write_unit_wg_tasks) {
+                for (auto *producer : last_write_unit_tasks) {
+                  sync_infos[{last_write_unit, last_write_wg_id}][{unit, wg_id}]
+                      .emplace(distance, buffer, producer, consumer,
+                               num_versions);
+                }
+              }
+            }
+          }
+          // WAR: unit writes buffer, wait for all last readers
+          auto first_writes = unit->GetFirstAccessTasks(
+              buffer, /*is_write=*/true, wg_id, SchedulePhase::kBody);
+          if (!first_writes.empty()) {
+            for (int last_wg = 0; last_wg < num_wgs; ++last_wg) {
+              if (last_read_unit[last_wg] == nullptr)
+                continue;
+              for (auto *consumer : first_writes) {
+                for (auto *producer : last_read_unit_tasks[last_wg]) {
+                  sync_infos[{last_read_unit[last_wg], last_wg}][{unit, wg_id}]
+                      .emplace(distance, buffer, producer, consumer,
+                               num_versions);
+                }
+              }
+            }
+          }
+        }
+        // Set status to avoid redundant dependencies for subsequent units
         for (const auto &buffer_access :
              unit->GetBufferAccessInfo(num_wgs, SchedulePhase::kBody)) {
           int wg_id = buffer_access.warpgroup_id;
-          ICHECK(0 <= wg_id && wg_id < num_wgs);
           if (buffer_access.buffer != buffer)
             continue;
-          auto add_sync = [&](ScheduleUnit *wait_unit, int wait_wg_id,
-                              const std::set<const TaskNode *> &wait_tasks) {
-            int distance = iter ? num_versions : 0;
-            auto &wait_map = sync_infos[{wait_unit, wait_wg_id}];
-            auto it = wait_map.find({unit, wg_id});
-            for (auto wait_task : wait_tasks) {
-              wait_map[{unit, wg_id}].emplace(distance, buffer, wait_task,
-                                              buffer_access.task, num_versions);
-            }
-          };
           if (!buffer_access.is_write) {
-            if (last_write_unit == nullptr)
-              continue;
-            if (waited_write_wgs[wg_id])
-              continue;
-            add_sync(last_write_unit, last_write_wg_id, last_write_unit_tasks);
+            waited_write_wgs[wg_id] = true;
           } else {
-            for (int last_wg_id = 0; last_wg_id < num_wgs; ++last_wg_id) {
-              if (last_read_unit[last_wg_id] == nullptr)
-                continue;
-              add_sync(last_read_unit[last_wg_id], last_wg_id,
-                       last_read_unit_tasks[last_wg_id]);
+            for (int wg_id = 0; wg_id < num_wgs; ++wg_id) {
+              last_read_unit[wg_id] = nullptr;
             }
           }
         }
         if (iter == 0) {
-          for (const auto &buffer_access :
-               unit->GetBufferAccessInfo(num_wgs, SchedulePhase::kBody)) {
-            int wg_id = buffer_access.warpgroup_id;
-            if (buffer_access.buffer != buffer)
-              continue;
-            if (!buffer_access.is_write) {
-              waited_write_wgs[wg_id] = true;
-              last_read_unit_tasks[wg_id].clear();
-            } else {
-              for (int wg_id = 0; wg_id < num_wgs; ++wg_id) {
-                last_read_unit[wg_id] = nullptr;
-              }
-              last_write_unit_tasks.clear();
+          // Update last_read info
+          for (int wg = 0; wg < num_wgs; ++wg) {
+            auto last_reads = unit->GetLastAccessTasks(
+                buffer, /*is_write=*/false, wg, SchedulePhase::kBody);
+            if (!last_reads.empty()) {
+              last_read_unit[wg] = unit;
+              last_read_unit_tasks[wg] = std::move(last_reads);
             }
           }
-          for (const auto &buffer_access :
-               unit->GetBufferAccessInfo(num_wgs, SchedulePhase::kBody)) {
-            int wg_id = buffer_access.warpgroup_id;
-            if (buffer_access.buffer != buffer)
-              continue;
-            if (!buffer_access.is_write) {
-              last_read_unit[wg_id] = unit;
-              last_read_unit_tasks[wg_id].insert(buffer_access.task);
-            } else {
-              last_write_unit = unit;
-              last_write_unit_tasks.insert(buffer_access.task);
-              last_write_wg_id = wg_id;
-              for (int wg_id = 0; wg_id < num_wgs; ++wg_id) {
-                waited_write_wgs[wg_id] = false;
+          // Update last_write info
+          {
+            std::vector<int> write_wg_ids;
+            for (const auto &ba :
+                 unit->GetBufferAccessInfo(num_wgs, SchedulePhase::kBody)) {
+              if (ba.buffer == buffer && ba.is_write) {
+                if (std::find(write_wg_ids.begin(), write_wg_ids.end(),
+                              ba.warpgroup_id) == write_wg_ids.end())
+                  write_wg_ids.push_back(ba.warpgroup_id);
               }
+            }
+            if (!write_wg_ids.empty()) {
+              last_write_unit = unit;
+              last_write_unit_wg_tasks.clear();
+              for (int wg : write_wg_ids) {
+                auto last_writes = unit->GetLastAccessTasks(
+                    buffer, /*is_write=*/true, wg, SchedulePhase::kBody);
+                if (!last_writes.empty())
+                  last_write_unit_wg_tasks.emplace_back(wg,
+                                                        std::move(last_writes));
+              }
+              for (int wg = 0; wg < num_wgs; ++wg)
+                waited_write_wgs[wg] = false;
             }
           }
         }
@@ -751,35 +773,84 @@ static void InsertSynchronization(
       if (sync_it == sync_infos.end())
         continue;
       const auto &wait_map = sync_it->second;
-      bool is_async = unit->UsesTMACore() || unit->UsesTensorCore();
+      auto check_need_sync = [&](ScheduleUnit *waiting_unit, int waiting_wg_id,
+                                 const SyncInfo &sync_info) {
+        if (unit == waiting_unit)
+          // Note: the logic here need some assumption.
+          return false;
+        if (wg_id != waiting_wg_id)
+          return true;
+        if (!sync_info.producer->UsesTMACore() &&
+            !sync_info.producer->UsesTensorCore())
+          return false;
+        if (sync_info.producer->UsesTensorCore() &&
+            sync_info.consumer->UsesTensorCore())
+          return false;
+        return true;
+      };
       // Handle WGMMA synchronization
-      if (unit->HasWGMMA()) {
-        bool different_wg_id = false;
-        for (const auto &[waiting_unit_info, _] : wait_map) {
+      {
+        auto check_need_wgmma_sync = [&](ScheduleUnit *waiting_unit,
+                                         int waiting_wg_id,
+                                         const SyncInfo &sync_info) {
+          return check_need_sync(waiting_unit, waiting_wg_id, sync_info) &&
+                 sync_info.producer->is_WGMMA();
+        };
+        bool has_wgmma_sync = false;
+        for (const auto &[waiting_unit_info, sync_infos] : wait_map) {
           auto [waiting_unit, waiting_wg_id] = waiting_unit_info;
-          if (waiting_wg_id != wg_id) {
-            different_wg_id = true;
+          for (const auto &sync_info : sync_infos) {
+            if (check_need_wgmma_sync(waiting_unit, waiting_wg_id, sync_info)) {
+              has_wgmma_sync = true;
+              break;
+            }
+          }
+          if (has_wgmma_sync) {
             break;
           }
         }
-        if (!different_wg_id) {
-          for (const auto &[waiting_unit_info, _] : wait_map) {
+        if (has_wgmma_sync) {
+          bool different_wg_id = false;
+          for (const auto &[waiting_unit_info, sync_infos] : wait_map) {
             auto [waiting_unit, waiting_wg_id] = waiting_unit_info;
-            int num_mma = 0;
-            Stmt wait_stmt =
-                Evaluate(Call(DataType::Handle(), wait_wgmma(), {num_mma}));
-            InsertStatementIntoScheduleUnit(waiting_unit, wait_stmt, true,
-                                            wg_id);
+            if (wg_id == waiting_wg_id) {
+              continue;
+            }
+            for (const auto &sync_info : sync_infos) {
+              if (check_need_wgmma_sync(waiting_unit, waiting_wg_id,
+                                        sync_info)) {
+                different_wg_id = true;
+                break;
+              }
+            }
+            if (different_wg_id) {
+              break;
+            }
           }
-        } else {
-          Stmt wait_stmt =
-              Evaluate(Call(DataType::Handle(), wait_wgmma(), {0}));
-          InsertStatementIntoScheduleUnit(unit, wait_stmt, false, wg_id);
+          if (!different_wg_id) {
+            for (const auto &[waiting_unit_info, sync_infos] : wait_map) {
+              auto [waiting_unit, waiting_wg_id] = waiting_unit_info;
+              bool need_wait = false;
+              for (const auto &sync_info : sync_infos) {
+                if (check_need_wgmma_sync(waiting_unit, waiting_wg_id,
+                                          sync_info)) {
+                  need_wait = true;
+                  break;
+                }
+              }
+              if (need_wait) {
+                Stmt wait_stmt =
+                    Evaluate(Call(DataType::Handle(), wait_wgmma(), {0}));
+                InsertStatementIntoScheduleUnit(waiting_unit, wait_stmt, true,
+                                                wg_id);
+              }
+            }
+          } else {
+            Stmt wait_stmt =
+                Evaluate(Call(DataType::Handle(), wait_wgmma(), {0}));
+            InsertStatementIntoScheduleUnit(unit, wait_stmt, false, wg_id);
+          }
         }
-        // Even if different_wg_id is false, we already inserted the necessary
-        // wait_wgmma statements inside the warp group. Now we can consider the
-        // unit as synchronized unless it uses other asynchronous operations.
-        is_async = unit->UsesTMACore();
       }
       int barrier_versions = 1;
       for (const auto &[waiting_unit_info, sync_infos] : wait_map) {
@@ -828,20 +899,8 @@ static void InsertSynchronization(
       auto check_need_barrier = [&](ScheduleUnit *waiting_unit,
                                     int waiting_wg_id,
                                     const SyncInfo &sync_info) {
-        if (unit == waiting_unit)
-          // Note: the logic here need some assumption.
-          return false;
-        if (wg_id != waiting_wg_id)
-          return true;
-        if (!is_async)
-          return false;
-        if (!sync_info.producer->UsesTMACore() &&
-            !sync_info.producer->UsesTensorCore())
-          return false;
-        if (sync_info.producer->UsesTensorCore() &&
-            sync_info.consumer->UsesTensorCore())
-          return false;
-        return true;
+        return check_need_sync(waiting_unit, waiting_wg_id, sync_info) &&
+               (wg_id != waiting_wg_id || !sync_info.producer->is_WGMMA());
       };
       bool need_barrier = false;
       for (const auto &[waiting_unit_info, sync_infos] : wait_map) {

@@ -159,6 +159,38 @@ public:
     return std::vector<BufferAccessInfo>(result.begin(), result.end());
   }
 
+  // Collect tasks that could possibly be the first/last to access a specific
+  // (buffer, is_write, wg_id) within this IR subtree.
+  // The result set is populated with candidate tasks.
+  // Returns true if this subtree is guaranteed to contain at least one matching
+  // access (i.e., the access must happen unconditionally).
+  virtual bool
+  CollectFirstAccessTasks(const Buffer &buffer, bool is_write, int wg_id,
+                          SchedulePhase phase,
+                          std::set<const TaskNode *> &result) const = 0;
+
+  virtual bool
+  CollectLastAccessTasks(const Buffer &buffer, bool is_write, int wg_id,
+                         SchedulePhase phase,
+                         std::set<const TaskNode *> &result) const = 0;
+
+  // Convenience wrappers that return the result set directly.
+  std::set<const TaskNode *>
+  GetFirstAccessTasks(const Buffer &buffer, bool is_write, int wg_id,
+                      SchedulePhase phase = SchedulePhase::kBody) const {
+    std::set<const TaskNode *> result;
+    CollectFirstAccessTasks(buffer, is_write, wg_id, phase, result);
+    return result;
+  }
+
+  std::set<const TaskNode *>
+  GetLastAccessTasks(const Buffer &buffer, bool is_write, int wg_id,
+                     SchedulePhase phase = SchedulePhase::kBody) const {
+    std::set<const TaskNode *> result;
+    CollectLastAccessTasks(buffer, is_write, wg_id, phase, result);
+    return result;
+  }
+
   // Substitute a variable throughout this IR node
   virtual void SubstituteVar(const Var &old_var, const Var &new_var) = 0;
 
@@ -368,6 +400,15 @@ public:
   CollectBufferAccessInfo(int num_wgs, SchedulePhase phase,
                           std::set<BufferAccessInfo> &result) const override;
 
+  bool
+  CollectFirstAccessTasks(const Buffer &buffer, bool is_write, int wg_id,
+                          SchedulePhase phase,
+                          std::set<const TaskNode *> &result) const override;
+  bool
+  CollectLastAccessTasks(const Buffer &buffer, bool is_write, int wg_id,
+                         SchedulePhase phase,
+                         std::set<const TaskNode *> &result) const override;
+
   bool containWarpgroupId(int id) const override {
     return ContainsLoopBreak() || IsWarpgroupBroadcast(warpgroup_id_) ||
            warpgroup_id_ == id;
@@ -525,6 +566,15 @@ public:
   CollectBufferAccessInfo(int num_wgs, SchedulePhase phase,
                           std::set<BufferAccessInfo> &result) const override;
 
+  bool
+  CollectFirstAccessTasks(const Buffer &buffer, bool is_write, int wg_id,
+                          SchedulePhase phase,
+                          std::set<const TaskNode *> &result) const override;
+  bool
+  CollectLastAccessTasks(const Buffer &buffer, bool is_write, int wg_id,
+                         SchedulePhase phase,
+                         std::set<const TaskNode *> &result) const override;
+
   bool hasPromote() const { return has_promote_; }
 
   void SetPromote(bool promote) { has_promote_ = promote; }
@@ -662,6 +712,15 @@ public:
   void
   CollectBufferAccessInfo(int num_wgs, SchedulePhase phase,
                           std::set<BufferAccessInfo> &result) const override;
+
+  bool
+  CollectFirstAccessTasks(const Buffer &buffer, bool is_write, int wg_id,
+                          SchedulePhase phase,
+                          std::set<const TaskNode *> &result) const override;
+  bool
+  CollectLastAccessTasks(const Buffer &buffer, bool is_write, int wg_id,
+                         SchedulePhase phase,
+                         std::set<const TaskNode *> &result) const override;
 
   // Clone method
   std::shared_ptr<IRStructure> Clone() const override;
@@ -837,6 +896,15 @@ public:
   CollectBufferAccessInfo(int num_wgs, SchedulePhase phase,
                           std::set<BufferAccessInfo> &result) const override;
 
+  bool
+  CollectFirstAccessTasks(const Buffer &buffer, bool is_write, int wg_id,
+                          SchedulePhase phase,
+                          std::set<const TaskNode *> &result) const override;
+  bool
+  CollectLastAccessTasks(const Buffer &buffer, bool is_write, int wg_id,
+                         SchedulePhase phase,
+                         std::set<const TaskNode *> &result) const override;
+
   // Clone method
   std::shared_ptr<IRStructure> Clone() const override;
 
@@ -945,6 +1013,15 @@ public:
   CollectBufferAccessInfo(int num_wgs, SchedulePhase phase,
                           std::set<BufferAccessInfo> &result) const override;
 
+  bool
+  CollectFirstAccessTasks(const Buffer &buffer, bool is_write, int wg_id,
+                          SchedulePhase phase,
+                          std::set<const TaskNode *> &result) const override;
+  bool
+  CollectLastAccessTasks(const Buffer &buffer, bool is_write, int wg_id,
+                         SchedulePhase phase,
+                         std::set<const TaskNode *> &result) const override;
+
   int GetStage() const { return stage; }
   bool isInnerTask() const { return child->IsTask(); }
   int GetWarpgroupId() const override {
@@ -1022,6 +1099,15 @@ public:
   void
   CollectBufferAccessInfo(int num_wgs, SchedulePhase phase,
                           std::set<BufferAccessInfo> &result) const override;
+
+  bool
+  CollectFirstAccessTasks(const Buffer &buffer, bool is_write, int wg_id,
+                          SchedulePhase phase,
+                          std::set<const TaskNode *> &result) const override;
+  bool
+  CollectLastAccessTasks(const Buffer &buffer, bool is_write, int wg_id,
+                         SchedulePhase phase,
+                         std::set<const TaskNode *> &result) const override;
 
   // Clone method
   std::shared_ptr<IRStructure> Clone() const override;
