@@ -182,7 +182,8 @@ private:
   Map<Var, Buffer> var_to_new_buffer_;
 };
 
-// Collect all local.fragment Buffers
+// Collect all local / local.var / local.fragment Buffers written by
+// broadcast tasks so each warpgroup gets its own private copy.
 static void CollectBroadcastFragmentBuffersImpl(
     const IRStructure *node, std::unordered_set<const BufferNode *> &seen,
     std::vector<Buffer> &out) {
@@ -193,7 +194,8 @@ static void CollectBroadcastFragmentBuffersImpl(
     if (IsWarpgroupBroadcast(task->GetWarpgroupId())) {
       for (const auto &region : task->GetWriteRegions()) {
         if (IsRegisterRegion(region) &&
-            region->buffer.scope() == "local.fragment") {
+            (IsFragmentBuffer(region->buffer) ||
+             IsLocalBuffer(region->buffer, /*allow_var=*/true))) {
           if (!seen.count(region->buffer.get())) {
             seen.insert(region->buffer.get());
             out.push_back(region->buffer);
