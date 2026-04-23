@@ -624,18 +624,19 @@ AssignWarpgroupIdsGlobal(IRStructure *root, const WarpSpecializeConfig &config,
     }
   }
 
-  std::unordered_set<TaskNode *> prefix_tasks;
-  CollectPrefixTasks(root, prefix_tasks);
-  for (auto *task : prefix_tasks) {
-    task->SetSchedulePhase(SchedulePhase::kPrologue);
-    task->SetWarpgroupId(0);
-  }
+  std::unordered_set<TaskNode *> prefix_tasks, suffix_tasks;
+  if (config.producer_thread_count == 32) {
+    CollectPrefixTasks(root, prefix_tasks);
+    for (auto *task : prefix_tasks) {
+      task->SetSchedulePhase(SchedulePhase::kPrologue);
+      task->SetWarpgroupId(0);
+    }
 
-  std::unordered_set<TaskNode *> suffix_tasks;
-  CollectSuffixTasks(root, all_tasks, uf, suffix_tasks);
-  for (auto *task : suffix_tasks) {
-    task->SetSchedulePhase(SchedulePhase::kEpilogue);
-    task->SetWarpgroupId(0);
+    CollectSuffixTasks(root, all_tasks, uf, suffix_tasks);
+    for (auto *task : suffix_tasks) {
+      task->SetSchedulePhase(SchedulePhase::kEpilogue);
+      task->SetWarpgroupId(0);
+    }
   }
 
   std::unordered_map<int, std::vector<int>> components;
@@ -999,28 +1000,30 @@ NaiveAssignWarpgroupIds(IRStructure *root, const WarpSpecializeConfig &config,
     }
   }
 
-  // Collect prefix/suffix tasks and reset them to neutral
-  std::unordered_set<TaskNode *> prefix_tasks;
-  CollectPrefixTasks(root, prefix_tasks);
-  for (auto *task : prefix_tasks) {
-    task->SetSchedulePhase(SchedulePhase::kPrologue);
-    task->SetWarpgroupId(0);
-  }
+  if (config.producer_thread_count == 32) {
+    // Collect prefix/suffix tasks and reset them to neutral
+    std::unordered_set<TaskNode *> prefix_tasks;
+    CollectPrefixTasks(root, prefix_tasks);
+    for (auto *task : prefix_tasks) {
+      task->SetSchedulePhase(SchedulePhase::kPrologue);
+      task->SetWarpgroupId(0);
+    }
 
-  int n = all_tasks.size();
-  TaskUnionFind uf(n);
-  for (int i = 0; i < n; i++) {
-    for (int j = i + 1; j < n; j++) {
-      if (UseSameRegisterRegion(all_tasks[i].task, all_tasks[j].task)) {
-        uf.unite(i, j);
+    int n = all_tasks.size();
+    TaskUnionFind uf(n);
+    for (int i = 0; i < n; i++) {
+      for (int j = i + 1; j < n; j++) {
+        if (UseSameRegisterRegion(all_tasks[i].task, all_tasks[j].task)) {
+          uf.unite(i, j);
+        }
       }
     }
-  }
-  std::unordered_set<TaskNode *> suffix_tasks;
-  CollectSuffixTasks(root, all_tasks, uf, suffix_tasks);
-  for (auto *task : suffix_tasks) {
-    task->SetSchedulePhase(SchedulePhase::kEpilogue);
-    task->SetWarpgroupId(0);
+    std::unordered_set<TaskNode *> suffix_tasks;
+    CollectSuffixTasks(root, all_tasks, uf, suffix_tasks);
+    for (auto *task : suffix_tasks) {
+      task->SetSchedulePhase(SchedulePhase::kEpilogue);
+      task->SetWarpgroupId(0);
+    }
   }
 
   // no double_thread in naive mode
