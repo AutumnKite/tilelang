@@ -110,10 +110,25 @@ bool SameBuffer(const BufferRegion &a, const BufferRegion &b) {
 
 bool SameVar(const Var &a, const Var &b) { return a.same_as(b); }
 
+bool IsAttrInTask(const IRStructure *a) {
+  if (!a->IsTask()) {
+    return false;
+  }
+  auto task = static_cast<const TaskNode *>(a);
+  for (const auto &stmt : task->stmts) {
+    if (stmt.as<AttrStmtNode>()) {
+      return true;
+    }
+  }
+  return false;
+}
+
 bool HasDependency(const IRStructure *a, const IRStructure *b) {
   if (a->ContainsLoopBreak())
     return true;
   if (b->ContainsLoopBreak())
+    return true;
+  if (IsAttrInTask(a) || IsAttrInTask(b))
     return true;
   for (const auto &write_region_a : a->GetWriteRegions()) {
     for (const auto &read_region_b : b->GetReadRegions()) {
@@ -134,6 +149,12 @@ bool HasDependency(const IRStructure *a, const IRStructure *b) {
   for (const auto &write_var_a : a->GetWriteVars()) {
     for (const auto &read_var_b : b->GetReadVars()) {
       if (SameVar(write_var_a, read_var_b))
+        return true;
+    }
+  }
+  for (const auto &read_var_a : a->GetReadVars()) {
+    for (const auto &write_var_b : b->GetWriteVars()) {
+      if (SameVar(read_var_a, write_var_b))
         return true;
     }
   }
