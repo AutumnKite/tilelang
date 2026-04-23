@@ -110,10 +110,25 @@ bool SameBuffer(const BufferRegion &a, const BufferRegion &b) {
 
 bool SameVar(const Var &a, const Var &b) { return a.same_as(b); }
 
+bool IsAttrInTask(const IRStructure *a) {
+  if (!a->IsTask()) {
+    return false;
+  }
+  auto task = static_cast<const TaskNode *>(a);
+  for (const auto &stmt : task->stmts) {
+    if (stmt.as<AttrStmtNode>()) {
+      return true;
+    }
+  }
+  return false;
+}
+
 bool HasDependency(const IRStructure *a, const IRStructure *b) {
   if (a->ContainsLoopBreak())
     return true;
   if (b->ContainsLoopBreak())
+    return true;
+  if (IsAttrInTask(a) || IsAttrInTask(b))
     return true;
   for (const auto &write_region_a : a->GetWriteRegions()) {
     for (const auto &read_region_b : b->GetReadRegions()) {
@@ -134,6 +149,12 @@ bool HasDependency(const IRStructure *a, const IRStructure *b) {
   for (const auto &write_var_a : a->GetWriteVars()) {
     for (const auto &read_var_b : b->GetReadVars()) {
       if (SameVar(write_var_a, read_var_b))
+        return true;
+    }
+  }
+  for (const auto &read_var_a : a->GetReadVars()) {
+    for (const auto &write_var_b : b->GetWriteVars()) {
+      if (SameVar(read_var_a, write_var_b))
         return true;
     }
   }
@@ -624,18 +645,19 @@ AssignWarpgroupIdsGlobal(IRStructure *root, const WarpSpecializeConfig &config,
     }
   }
 
-  std::unordered_set<TaskNode *> prefix_tasks;
-  CollectPrefixTasks(root, prefix_tasks);
-  for (auto *task : prefix_tasks) {
-    task->SetSchedulePhase(SchedulePhase::kPrologue);
-    task->SetWarpgroupId(0);
-  }
+  std::unordered_set<TaskNode *> prefix_tasks, suffix_tasks;
+  if (config.producer_thread_count == 32) {
+    CollectPrefixTasks(root, prefix_tasks);
+    for (auto *task : prefix_tasks) {
+      task->SetSchedulePhase(SchedulePhase::kPrologue);
+      task->SetWarpgroupId(0);
+    }
 
-  std::unordered_set<TaskNode *> suffix_tasks;
-  CollectSuffixTasks(root, all_tasks, uf, suffix_tasks);
-  for (auto *task : suffix_tasks) {
-    task->SetSchedulePhase(SchedulePhase::kEpilogue);
-    task->SetWarpgroupId(0);
+    CollectSuffixTasks(root, all_tasks, uf, suffix_tasks);
+    for (auto *task : suffix_tasks) {
+      task->SetSchedulePhase(SchedulePhase::kEpilogue);
+      task->SetWarpgroupId(0);
+    }
   }
 
   std::unordered_map<int, std::vector<int>> components;
@@ -999,28 +1021,30 @@ NaiveAssignWarpgroupIds(IRStructure *root, const WarpSpecializeConfig &config,
     }
   }
 
-  // Collect prefix/suffix tasks and reset them to neutral
-  std::unordered_set<TaskNode *> prefix_tasks;
-  CollectPrefixTasks(root, prefix_tasks);
-  for (auto *task : prefix_tasks) {
-    task->SetSchedulePhase(SchedulePhase::kPrologue);
-    task->SetWarpgroupId(0);
-  }
+  if (config.producer_thread_count == 32) {
+    // Collect prefix/suffix tasks and reset them to neutral
+    std::unordered_set<TaskNode *> prefix_tasks;
+    CollectPrefixTasks(root, prefix_tasks);
+    for (auto *task : prefix_tasks) {
+      task->SetSchedulePhase(SchedulePhase::kPrologue);
+      task->SetWarpgroupId(0);
+    }
 
-  int n = all_tasks.size();
-  TaskUnionFind uf(n);
-  for (int i = 0; i < n; i++) {
-    for (int j = i + 1; j < n; j++) {
-      if (UseSameRegisterRegion(all_tasks[i].task, all_tasks[j].task)) {
-        uf.unite(i, j);
+    int n = all_tasks.size();
+    TaskUnionFind uf(n);
+    for (int i = 0; i < n; i++) {
+      for (int j = i + 1; j < n; j++) {
+        if (UseSameRegisterRegion(all_tasks[i].task, all_tasks[j].task)) {
+          uf.unite(i, j);
+        }
       }
     }
-  }
-  std::unordered_set<TaskNode *> suffix_tasks;
-  CollectSuffixTasks(root, all_tasks, uf, suffix_tasks);
-  for (auto *task : suffix_tasks) {
-    task->SetSchedulePhase(SchedulePhase::kEpilogue);
-    task->SetWarpgroupId(0);
+    std::unordered_set<TaskNode *> suffix_tasks;
+    CollectSuffixTasks(root, all_tasks, uf, suffix_tasks);
+    for (auto *task : suffix_tasks) {
+      task->SetSchedulePhase(SchedulePhase::kEpilogue);
+      task->SetWarpgroupId(0);
+    }
   }
 
   // no double_thread in naive mode
@@ -1114,6 +1138,23 @@ void ScheduleUnitBuilder::NaiveScheduleLoop(ControlNode *ctrl) {
                     node_i_let_stmt->value, Evaluate(0));
         auto cloned_task = std::make_shared<TaskNode>();
         cloned_task->stmts.push_back(cloned_let_stmt);
+        cloned_task->SetReadRegions(node_i_task->GetReadRegions());
+        cloned_task->SetWriteRegions(node_i_task->GetWriteRegions());
+        cloned_task->SetReadVars(node_i_task->GetReadVars());
+        {
+          auto write_vars = node_i_task->GetWriteVars();
+          for (auto &v : write_vars) {
+            if (v.same_as(node_i_let_stmt->var)) {
+              v = cloned_let_stmt->var;
+            }
+          }
+          cloned_task->SetWriteVars(write_vars);
+        }
+        cloned_task->SetLatency(node_i_task->GetLatency());
+        cloned_task->SetII(node_i_task->GetII());
+        cloned_task->SetUsesCUDACore(node_i_task->UsesCUDACore());
+        cloned_task->SetUsesTMACore(node_i_task->UsesTMACore());
+        cloned_task->SetUsesTensorCore(node_i_task->UsesTensorCore());
         stage_map[cloned_task.get()] = rem_stage_j;
 
         for (int k = j; k < n; ++k) {

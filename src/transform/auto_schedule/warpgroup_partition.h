@@ -43,9 +43,6 @@ CloneIRStructureWithWarpgroupFilter(IRStructure *node, int warpgroup_id,
 std::shared_ptr<IRStructure>
 CloneIRStructureWithWarpgroupFilter(IRStructure *node, int warpgroup_id);
 
-std::shared_ptr<IRStructure>
-RemoveUnusedLetDecls(std::shared_ptr<IRStructure> root);
-
 std::vector<std::shared_ptr<IRStructure>>
 CloneIRStructureChildrenWithWarpgroupFilter(SequenceNode *root_seq,
                                             int warpgroup_id,
@@ -69,6 +66,8 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
     std::vector<Buffer> &duplicated_fragment_buffers);
 
 Stmt ReNestLetStmts(const Stmt &stmt);
+
+Stmt StripUnusedLetStmts(const Stmt &stmt);
 
 } // namespace tl
 } // namespace tvm

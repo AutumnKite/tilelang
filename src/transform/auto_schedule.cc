@@ -53,6 +53,7 @@
 #include <utility>
 #include <vector>
 
+#include "../layout/layout.h"
 #include "../op/builtin.h"
 #include "../op/copy.h"
 #include "../op/gemm.h"
@@ -742,6 +743,7 @@ ScheduleSingleKernel(const Stmt &kernel_body, IterVar thread_var, Target target,
   if (!config.enable_warpgroup_partition) {
     result.scheduled_body =
         ConvertIRStructureToStmt(ir_structure.get(), enable_epi);
+    result.scheduled_body = StripUnusedLetStmts(result.scheduled_body);
     result.did_warpgroup_partition = false;
     return result;
   }
@@ -772,6 +774,7 @@ ScheduleSingleKernel(const Stmt &kernel_body, IterVar thread_var, Target target,
       ir_structure.get(), thread_var, result.barrier_buffers,
       result.barrier_map, enable_epi, thread_count, config,
       neutral_sync_shared_barrier, result.duplicated_fragment_buffers);
+  result.scheduled_body = StripUnusedLetStmts(result.scheduled_body);
   result.did_warpgroup_partition = true;
   return result;
 }
@@ -1152,6 +1155,96 @@ Stmt ReNestLetStmts(const Stmt &stmt) {
 }
 
 // StmtMutator to rewrite alloc_buffers in Block nodes
+namespace {
+
+bool LayoutShapesEqual(const Array<PrimExpr> &lhs, const Array<PrimExpr> &rhs,
+                       arith::Analyzer *analyzer) {
+  if (lhs.size() != rhs.size()) {
+    return false;
+  }
+  for (size_t i = 0; i < lhs.size(); ++i) {
+    if (!analyzer->CanProveEqual(lhs[i], rhs[i])) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// Expand an annotated Layout so its InputShape matches the multi-versioned
+// buffer shape by prepending the leading "num_versions" dim(s).
+Layout ExpandAnnotatedLayoutForMultiVersionedBuffer(const Layout &layout,
+                                                    const Buffer &old_buffer,
+                                                    const Buffer &new_buffer) {
+  if (!layout.defined() ||
+      new_buffer->shape.size() <= old_buffer->shape.size()) {
+    return Layout();
+  }
+
+  arith::Analyzer analyzer;
+  if (!LayoutShapesEqual(layout->InputShape(), old_buffer->shape, &analyzer)) {
+    return Layout();
+  }
+
+  size_t leading_ndim = new_buffer->shape.size() - old_buffer->shape.size();
+  Array<PrimExpr> trailing_shape;
+  Array<PrimExpr> leading_shape;
+  for (size_t i = 0; i < leading_ndim; ++i) {
+    leading_shape.push_back(new_buffer->shape[i]);
+  }
+  for (size_t i = 0; i < old_buffer->shape.size(); ++i) {
+    trailing_shape.push_back(new_buffer->shape[leading_ndim + i]);
+  }
+  if (!LayoutShapesEqual(trailing_shape, old_buffer->shape, &analyzer)) {
+    return Layout();
+  }
+
+  return layout->Expand(leading_shape);
+}
+
+// Walk the block's layout_map annotation and expand any entries whose buffer
+// has been multi-versioned so downstream LayoutInference sees a matching shape.
+bool UpdateExpandedLayoutMapForRemappedAllocs(
+    const std::vector<std::pair<Buffer, Buffer>> &remapped_allocs,
+    Map<String, ffi::Any> *annotations) {
+  if (remapped_allocs.empty() || !annotations->count(attr::kLayoutMap)) {
+    return false;
+  }
+
+  auto layout_map_ref = annotations->Get(attr::kLayoutMap);
+  if (!layout_map_ref.has_value()) {
+    return false;
+  }
+  auto layout_map = layout_map_ref.value().as<Map<Var, Layout>>();
+  if (!layout_map.has_value()) {
+    return false;
+  }
+
+  Map<Var, Layout> updated_layout_map = layout_map.value();
+  std::unordered_set<const VarNode *> visited;
+  bool changed = false;
+  for (const auto &[old_buffer, new_buffer] : remapped_allocs) {
+    if (!visited.insert(old_buffer->data.get()).second ||
+        !updated_layout_map.count(old_buffer->data)) {
+      continue;
+    }
+    Layout layout = updated_layout_map[old_buffer->data];
+    Layout expanded = ExpandAnnotatedLayoutForMultiVersionedBuffer(
+        layout, old_buffer, new_buffer);
+    if (!expanded.defined()) {
+      continue;
+    }
+    updated_layout_map.Set(old_buffer->data, expanded);
+    changed = true;
+  }
+
+  if (changed) {
+    annotations->Set(attr::kLayoutMap, updated_layout_map);
+  }
+  return changed;
+}
+
+} // namespace
+
 class AllocBufferRewriter : public StmtMutator {
 public:
   AllocBufferRewriter(const std::vector<MultiVersionBufferInfo> &buffer_infos)
@@ -1169,11 +1262,13 @@ private:
     // Check if we need to update alloc_buffers
     bool needs_update = false;
     Array<Buffer> new_alloc_buffers;
+    std::vector<std::pair<Buffer, Buffer>> remapped_allocs;
 
     for (auto buffer : op->alloc_buffers) {
       auto it = buffer_remap_.find(buffer);
       if (it != buffer_remap_.end()) {
         new_alloc_buffers.push_back(it->second);
+        remapped_allocs.emplace_back(buffer, it->second);
         needs_update = true;
       } else {
         new_alloc_buffers.push_back(buffer);
@@ -1184,6 +1279,8 @@ private:
     new_block->body = new_body;
     if (needs_update) {
       new_block->alloc_buffers = new_alloc_buffers;
+      UpdateExpandedLayoutMapForRemappedAllocs(remapped_allocs,
+                                               &new_block->annotations);
     }
     return Stmt(new_block);
   }
