@@ -766,15 +766,11 @@ ScheduleSingleKernel(const Stmt &kernel_body, IterVar thread_var, Target target,
                            thread_count, loop_info, result.buffer_infos,
                            neutral_sync_shared_barrier);
 
-  // Print the modified summary view
-  // PrintIRStructure(ir_structure.get());
-
   // Apply warpgroup partition to entire IRStructure
   result.scheduled_body = ApplyWarpgroupPartitionToIRStructure(
       ir_structure.get(), thread_var, result.barrier_buffers,
       result.barrier_map, enable_epi, thread_count, config,
       neutral_sync_shared_barrier, result.duplicated_fragment_buffers);
-  result.scheduled_body = StripUnusedLetStmts(result.scheduled_body);
   result.did_warpgroup_partition = true;
   return result;
 }
@@ -896,6 +892,7 @@ tvm::transform::Pass AutoSchedule(const bool enable_epi) {
       }
 
       final_body = ReNestLetStmts(final_body);
+      final_body = StripUnusedLetStmts(final_body);
 
       // Create a new PrimFunc with the updated body
       auto new_func = PrimFunc(func->params, final_body, func->ret_type,
@@ -1001,6 +998,7 @@ tvm::transform::Pass AutoSchedule(const bool enable_epi) {
     Stmt final_body = seq_replacer(func->body);
 
     final_body = ReNestLetStmts(final_body);
+    final_body = StripUnusedLetStmts(final_body);
 
     // Create a new PrimFunc with the updated body
     auto new_func = PrimFunc(func->params, final_body, func->ret_type,
