@@ -572,9 +572,8 @@ public:
     Stmt new_body = this->VisitStmt(op->body);
     PrimExpr new_value = this->VisitExpr(op->value);
 
-    auto body_uses_var = UsesVar(new_body, [&](const VarNode *v) {
-      return v == op->var.get();
-    });
+    auto body_uses_var =
+        UsesVar(new_body, [&](const VarNode *v) { return v == op->var.get(); });
     bool value_is_pure = SideEffect(new_value) <= CallEffectKind::kPure;
 
     if (!body_uses_var && value_is_pure) {

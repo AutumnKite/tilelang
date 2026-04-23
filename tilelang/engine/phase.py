@@ -41,18 +41,22 @@ def module_uses_thread_var(mod: IRModule) -> bool:
         thread_extent_vars: set = set()
         explicit_thread_binding_loop: list[bool] = [False]
 
-        def _collect(node):
+        def _collect(
+            node,
+            _thread_extent_vars=thread_extent_vars,
+            _explicit_thread_binding_loop=explicit_thread_binding_loop,
+        ):
             if isinstance(node, tir.AttrStmt) and node.attr_key == "thread_extent":
                 iter_var = node.node
                 if isinstance(iter_var, tir.IterVar):
                     tag = getattr(iter_var, "thread_tag", "") or ""
                     if tag.startswith("threadIdx."):
-                        thread_extent_vars.add(iter_var.var)
+                        _thread_extent_vars.add(iter_var.var)
             elif isinstance(node, tir.For) and node.kind == tir.ForKind.THREAD_BINDING:
                 tb = node.thread_binding
                 tag = getattr(tb, "thread_tag", "") if tb is not None else ""
                 if isinstance(tag, str) and tag.startswith("threadIdx."):
-                    explicit_thread_binding_loop[0] = True
+                    _explicit_thread_binding_loop[0] = True
 
         stmt_functor.post_order_visit(func.body, _collect)
 
@@ -64,14 +68,22 @@ def module_uses_thread_var(mod: IRModule) -> bool:
 
         uses_thread_var = [False]
 
-        def _find_use(node):
-            if uses_thread_var[0]:
+        def _find_use(
+            node,
+            _uses_thread_var=uses_thread_var,
+            _thread_extent_vars=thread_extent_vars,
+        ):
+            if _uses_thread_var[0]:
                 return
-            if isinstance(node, tir.Var) and node in thread_extent_vars:
-                uses_thread_var[0] = True
+            if isinstance(node, tir.Var) and node in _thread_extent_vars:
+                _uses_thread_var[0] = True
 
-        def _walk(stmt):
-            if uses_thread_var[0]:
+        def _walk(
+            stmt,
+            _uses_thread_var=uses_thread_var,
+            _find_use=_find_use,
+        ):
+            if _uses_thread_var[0]:
                 return
             if isinstance(stmt, tir.AttrStmt) and stmt.attr_key == "thread_extent":
                 _walk(stmt.body)
