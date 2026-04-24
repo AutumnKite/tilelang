@@ -665,18 +665,35 @@ GetSyncInfos(const std::vector<ScheduleUnit *> &units, int num_wgs,
               }
             }
           }
-          // WAR: unit writes buffer, wait for all last readers
+          // WAR/WAW: unit writes buffer, wait for all last readers
+          // if there are no last readers, wait for last writer
           auto first_writes = unit->GetFirstAccessTasks(
               buffer, /*is_write=*/true, wg_id, SchedulePhase::kBody);
           if (!first_writes.empty()) {
+            bool has_last_read = false;
             for (int last_wg = 0; last_wg < num_wgs; ++last_wg) {
               if (last_read_unit[last_wg] == nullptr)
                 continue;
+              has_last_read = true;
               for (auto *consumer : first_writes) {
                 for (auto *producer : last_read_unit_tasks[last_wg]) {
                   sync_infos[{last_read_unit[last_wg], last_wg}][{unit, wg_id}]
                       .emplace(distance, buffer, producer, consumer,
                                num_versions);
+                }
+              }
+            }
+            if (!has_last_read && last_write_unit != nullptr &&
+                !waited_write_wgs[wg_id]) {
+              for (auto *consumer : first_writes) {
+                for (const auto &[last_write_wg_id, last_write_unit_tasks] :
+                     last_write_unit_wg_tasks) {
+                  for (auto *producer : last_write_unit_tasks) {
+                    sync_infos[{last_write_unit, last_write_wg_id}]
+                              [{unit, wg_id}]
+                                  .emplace(distance, buffer, producer, consumer,
+                                           num_versions);
+                  }
                 }
               }
             }
@@ -690,10 +707,12 @@ GetSyncInfos(const std::vector<ScheduleUnit *> &units, int num_wgs,
             continue;
           if (!buffer_access.is_write) {
             waited_write_wgs[wg_id] = true;
+            last_read_unit[wg_id] = nullptr;
           } else {
             for (int wg_id = 0; wg_id < num_wgs; ++wg_id) {
               last_read_unit[wg_id] = nullptr;
             }
+            last_write_unit = nullptr;
           }
         }
         if (iter == 0) {
