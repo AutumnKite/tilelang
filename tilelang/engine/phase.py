@@ -29,8 +29,7 @@ def module_has_tma(mod: IRModule) -> bool:
 
 
 def module_has_barrier(mod: IRModule) -> bool:
-    """Check whether any PrimFunc in ``mod`` allocates / initializes an mbarrier.
-    """
+    """Check whether any PrimFunc in ``mod`` allocates / initializes an mbarrier."""
     from tvm.tir import stmt_functor
 
     for _, func in mod.functions.items():
@@ -60,10 +59,7 @@ def module_has_barrier(mod: IRModule) -> bool:
                 buffer = None
             if buffer is not None:
                 scope = buffer.scope() if hasattr(buffer, "scope") else ""
-                if isinstance(scope, str) and (
-                    scope.startswith("shared.barrier")
-                    or scope.startswith("shared.cluster_barrier")
-                ):
+                if isinstance(scope, str) and (scope.startswith("shared.barrier") or scope.startswith("shared.cluster_barrier")):
                     _found[0] = True
                     return
             # Block-level "barrier_init" annotation produced by alloc_barrier.
@@ -77,8 +73,7 @@ def module_has_barrier(mod: IRModule) -> bool:
                 value = node.value
                 scope_str = value.value if hasattr(value, "value") else str(value)
                 if isinstance(scope_str, str) and (
-                    scope_str.startswith("shared.barrier")
-                    or scope_str.startswith("shared.cluster_barrier")
+                    scope_str.startswith("shared.barrier") or scope_str.startswith("shared.cluster_barrier")
                 ):
                     _found[0] = True
 
@@ -315,11 +310,7 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.InjectAssumes()(mod)
     # Simplify the IR expressions
     mod = tilelang.transform.Simplify()(mod)
-    if (
-        allow_autoschedule(target=target)
-        and not module_uses_thread_var(mod)
-        and not module_has_barrier(mod)
-    ):
+    if allow_autoschedule(target=target) and not module_uses_thread_var(mod) and not module_has_barrier(mod):
         # Auto schedule for high-level operations.
         # Skip when the kernel already manages explicit mbarriers
         # (alloc_barrier / alloc_cluster_barrier), because reordering the
