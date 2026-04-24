@@ -1138,6 +1138,7 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
 
     std::vector<Stmt> segmented_stmts;
     bool first_non_let = true;
+    bool prev_was_loop = true;
 
     for (size_t ci = 0; ci < num_children; ++ci) {
       auto unit = static_cast<ScheduleUnit *>(root_seq->children[ci].get());
@@ -1246,13 +1247,21 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
         }
       }
 
-      // Insert liveness boundary before each non-empty non-LetDecl child
-      segmented_stmts.push_back(AttrStmt(
-          Integer(0), attr::kAutoScheduleSharedMemoryBoundary, 0, Evaluate(0)));
-
       if (is_shared_attr_segment && shared_attr_stmt.defined()) {
         segmented_stmts.push_back(shared_attr_stmt);
         continue;
+      }
+
+      bool is_loop = unit->child->IsControl();
+
+      // Insert liveness boundary only before for-loop segments and
+      // before non-loop segments that follow a for-loop. Consecutive
+      // non-loop segments share a single boundary to avoid introducing
+      // spurious buffer reuse hints between them.
+      if (prev_was_loop || is_loop) {
+        segmented_stmts.push_back(AttrStmt(
+            Integer(0), attr::kAutoScheduleSharedMemoryBoundary, 0,
+            Evaluate(0)));
       }
 
       // Prepend set_max_nreg only to the first non-LetDecl child
@@ -1270,6 +1279,8 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
       first_non_let = false;
 
       segmented_stmts.push_back(MakeWarpgroupIf(wg_stmts));
+
+      prev_was_loop = is_loop;
     }
     segmented_stmts.push_back(AttrStmt(
         Integer(0), attr::kAutoScheduleSharedMemoryBoundary, 0, Evaluate(0)));
