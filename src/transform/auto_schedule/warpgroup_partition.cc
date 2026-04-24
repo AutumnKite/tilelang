@@ -576,7 +576,7 @@ public:
 
     auto body_uses_var =
         UsesVar(new_body, [&](const VarNode *v) { return v == op->var.get(); });
-    bool value_is_pure = SideEffect(new_value) <= CallEffectKind::kPure;
+    bool value_is_pure = SideEffect(new_value) <= CallEffectKind::kReadState;
 
     if (!body_uses_var && value_is_pure) {
       return new_body;
