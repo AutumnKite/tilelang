@@ -1167,12 +1167,16 @@ inline MemoryType GetMemoryTypeFromScope(const String &scope) {
   return MemoryType::kUnknown;
 }
 
-// Helper function to check if a buffer region is in register memory
-inline bool IsRegisterRegion(const BufferRegion &region) {
-  const Buffer &buffer = region->buffer;
+// Helper function to check if a buffer is in register memory
+inline bool IsRegisterBuffer(const Buffer &buffer) {
   String scope = buffer.scope();
   MemoryType mem_type = GetMemoryTypeFromScope(scope);
   return mem_type == MemoryType::kRegister;
+}
+
+// Helper function to check if a buffer region is in register memory
+inline bool IsRegisterRegion(const BufferRegion &region) {
+  return IsRegisterBuffer(region->buffer);
 }
 
 // Helper function to collect all register regions from an IRStructure node

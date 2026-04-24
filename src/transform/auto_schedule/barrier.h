@@ -658,6 +658,10 @@ GetSyncInfos(const std::vector<ScheduleUnit *> &units, int num_wgs,
               for (const auto &[last_write_wg_id, last_write_unit_tasks] :
                    last_write_unit_wg_tasks) {
                 for (auto *producer : last_write_unit_tasks) {
+                  if (IsRegisterBuffer(buffer) && wg_id != last_write_wg_id) {
+                    // Skip cross-warpgroup dependency for register buffers
+                    continue;
+                  }
                   sync_infos[{last_write_unit, last_write_wg_id}][{unit, wg_id}]
                       .emplace(distance, buffer, producer, consumer,
                                num_versions);
@@ -677,6 +681,10 @@ GetSyncInfos(const std::vector<ScheduleUnit *> &units, int num_wgs,
               has_last_read = true;
               for (auto *consumer : first_writes) {
                 for (auto *producer : last_read_unit_tasks[last_wg]) {
+                  if (IsRegisterBuffer(buffer) && wg_id != last_wg) {
+                    // Skip cross-warpgroup dependency for register buffers
+                    continue;
+                  }
                   sync_infos[{last_read_unit[last_wg], last_wg}][{unit, wg_id}]
                       .emplace(distance, buffer, producer, consumer,
                                num_versions);
@@ -689,6 +697,10 @@ GetSyncInfos(const std::vector<ScheduleUnit *> &units, int num_wgs,
                 for (const auto &[last_write_wg_id, last_write_unit_tasks] :
                      last_write_unit_wg_tasks) {
                   for (auto *producer : last_write_unit_tasks) {
+                    if (IsRegisterBuffer(buffer) && wg_id != last_write_wg_id) {
+                      // Skip cross-warpgroup dependency for register buffers
+                      continue;
+                    }
                     sync_infos[{last_write_unit, last_write_wg_id}]
                               [{unit, wg_id}]
                                   .emplace(distance, buffer, producer, consumer,
