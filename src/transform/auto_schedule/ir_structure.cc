@@ -281,10 +281,10 @@ void TaskNode::CollectBufferAccessInfo(
       // Normal assigned warpgroup
       result.emplace(region->buffer, is_write, wg_id, this);
     } else if (IsWarpgroupBroadcast(wg_id)) {
-      // Broadcast: skip register memory (each wg has its own copy)
-      if (IsRegisterRegion(region)) {
-        return;
-      }
+      // Broadcast: skip register memory (each wg has its own copy), removed for barrier analysis.
+      // if (IsRegisterRegion(region)) {
+      //   return;
+      // }
       // Shared/global memory is shared across wgs — emit for all
       for (int i = 0; i < num_wgs; ++i) {
         result.emplace(region->buffer, is_write, i, this);

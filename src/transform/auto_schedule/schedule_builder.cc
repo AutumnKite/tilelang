@@ -1270,6 +1270,10 @@ void ScheduleUnitBuilder::NaiveScheduleRecursive(
         NaiveScheduleLoop(ctrl);
       } else {
         NaiveScheduleRecursive(ctrl->child);
+        auto seq_node = std::make_shared<SequenceNode>();
+        seq_node->children = {ctrl->child};
+        WrapInScheduleUnits(seq_node->children);
+        ctrl->child = seq_node;
       }
     }
   } else if (node->IsWrapper()) {
