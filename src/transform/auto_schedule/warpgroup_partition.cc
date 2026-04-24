@@ -1259,9 +1259,9 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
       // non-loop segments share a single boundary to avoid introducing
       // spurious buffer reuse hints between them.
       if (prev_was_loop || is_loop) {
-        segmented_stmts.push_back(AttrStmt(
-            Integer(0), attr::kAutoScheduleSharedMemoryBoundary, 0,
-            Evaluate(0)));
+        segmented_stmts.push_back(
+            AttrStmt(Integer(0), attr::kAutoScheduleSharedMemoryBoundary, 0,
+                     Evaluate(0)));
       }
 
       // Prepend set_max_nreg only to the first non-LetDecl child

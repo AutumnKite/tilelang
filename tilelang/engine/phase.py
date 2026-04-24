@@ -28,6 +28,67 @@ def module_has_tma(mod: IRModule) -> bool:
     return any(func.attrs and func.attrs.get("tl.has_tma", False) for _, func in mod.functions.items())
 
 
+def module_has_barrier(mod: IRModule) -> bool:
+    """Check whether any PrimFunc in ``mod`` allocates / initializes an mbarrier.
+    """
+    from tvm.tir import stmt_functor
+
+    for _, func in mod.functions.items():
+        if not isinstance(func, tir.PrimFunc):
+            continue
+
+        # Explicit allocations with a barrier storage scope.
+        for buf in func.buffer_map.values():
+            scope = buf.scope() if hasattr(buf, "scope") else ""
+            if isinstance(scope, str) and scope.startswith("shared.barrier"):
+                return True
+            if isinstance(scope, str) and scope.startswith("shared.cluster_barrier"):
+                return True
+
+        found = [False]
+
+        def _check(node, _found=found):
+            if _found[0]:
+                return
+            # Buffer / BufferRealize allocations inside the body.
+            buffer = None
+            if isinstance(node, tir.BufferRealize):
+                buffer = node.buffer
+            elif isinstance(node, tir.Allocate):
+                # Allocate does not carry storage scope directly; rely on the
+                # associated AttrStmt "storage_scope" picked up below.
+                buffer = None
+            if buffer is not None:
+                scope = buffer.scope() if hasattr(buffer, "scope") else ""
+                if isinstance(scope, str) and (
+                    scope.startswith("shared.barrier")
+                    or scope.startswith("shared.cluster_barrier")
+                ):
+                    _found[0] = True
+                    return
+            # Block-level "barrier_init" annotation produced by alloc_barrier.
+            if isinstance(node, tir.Block):
+                annotations = getattr(node, "annotations", None)
+                if annotations is not None and "barrier_init" in annotations:
+                    _found[0] = True
+                    return
+            # AttrStmt-level "storage_scope" carrying a barrier scope.
+            if isinstance(node, tir.AttrStmt) and node.attr_key == "storage_scope":
+                value = node.value
+                scope_str = value.value if hasattr(value, "value") else str(value)
+                if isinstance(scope_str, str) and (
+                    scope_str.startswith("shared.barrier")
+                    or scope_str.startswith("shared.cluster_barrier")
+                ):
+                    _found[0] = True
+
+        stmt_functor.post_order_visit(func.body, _check)
+        if found[0]:
+            return True
+
+    return False
+
+
 def module_uses_thread_var(mod: IRModule) -> bool:
     """Check whether any PrimFunc in ``mod`` references thread-index variables
     inside its body.
@@ -254,8 +315,16 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.InjectAssumes()(mod)
     # Simplify the IR expressions
     mod = tilelang.transform.Simplify()(mod)
-    if allow_autoschedule(target=target) and not module_uses_thread_var(mod):
-        # Auto schedule for high-level operations
+    if (
+        allow_autoschedule(target=target)
+        and not module_uses_thread_var(mod)
+        and not module_has_barrier(mod)
+    ):
+        # Auto schedule for high-level operations.
+        # Skip when the kernel already manages explicit mbarriers
+        # (alloc_barrier / alloc_cluster_barrier), because reordering the
+        # rewrites breaks invariants that later barrier lowering and the
+        # WS / pipelined TMA copy pipeline rely on.
         mod = tilelang.transform.IfConditionExtract()(mod)
         mod = tilelang.transform.AutoSchedule(False)(mod)
         mod = tilelang.transform.Simplify()(mod)
