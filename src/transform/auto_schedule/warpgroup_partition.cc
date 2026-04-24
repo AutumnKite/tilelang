@@ -468,25 +468,23 @@ CloneIRStructureWithWarpgroupFilter(IRStructure *node, int warpgroup_id,
     new_unit->child = CloneIRStructureWithWarpgroupFilter(
         unit->child.get(), warpgroup_id, var_remap, buffer_remap);
 
-    if (!child_is_let_decl) {
-      // Copy before/after for the target warp group
-      new_unit->before[warpgroup_id] = unit->before[warpgroup_id];
-      new_unit->after[warpgroup_id] = unit->after[warpgroup_id];
-      // Substitute renamed LetDecl variables in before/after stmts
-      if (!var_remap.empty()) {
-        for (auto &s : new_unit->before[warpgroup_id]) {
-          s = Substitute(s, var_remap);
-        }
-        for (auto &s : new_unit->after[warpgroup_id]) {
-          s = Substitute(s, var_remap);
-        }
-      }
+    // Copy before/after for the target warp group
+    new_unit->before[warpgroup_id] = unit->before[warpgroup_id];
+    new_unit->after[warpgroup_id] = unit->after[warpgroup_id];
+    // Substitute renamed LetDecl variables in before/after stmts
+    if (!var_remap.empty()) {
       for (auto &s : new_unit->before[warpgroup_id]) {
-        s = apply_buffer_remap_stmt(s);
+        s = Substitute(s, var_remap);
       }
       for (auto &s : new_unit->after[warpgroup_id]) {
-        s = apply_buffer_remap_stmt(s);
+        s = Substitute(s, var_remap);
       }
+    }
+    for (auto &s : new_unit->before[warpgroup_id]) {
+      s = apply_buffer_remap_stmt(s);
+    }
+    for (auto &s : new_unit->after[warpgroup_id]) {
+      s = apply_buffer_remap_stmt(s);
     }
     return new_unit;
   } else if (node->IsIf()) {
@@ -1116,18 +1114,27 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
   }
 
   // --- Per-child construction ---
-  // Walk root SequenceNode's children.  LetDecl children accumulate bindings;
-  // non-LetDecl children produce IfThenElse blocks wrapped with accumulated
-  // LetDecl scopes per warp group.
+  // Walk root SequenceNode's children.  LetDecl children accumulate as
+  // (var, value, before_stmts, after_stmts) tuples so that the cloned
+  // before/after barriers on their ScheduleUnit are preserved.  When wrapping
+  // a subsequent non-LetDecl child, each accumulated tuple is re-emitted as
+  //     <before_stmts> ; let var = value in (<after_stmts> ; body)
+  // so the barrier pair brackets the let binding while `var` stays in scope
+  // for the rest of the segment.
 
   Stmt if_then_else;
   if (root->IsSequence()) {
     auto root_seq = static_cast<SequenceNode *>(root);
     size_t num_children = root_seq->children.size();
 
-    // per-wg accumulated LetDecl {var, value} from earlier children
-    std::vector<std::vector<std::pair<Var, PrimExpr>>> wg_accumulated_lets(
-        num_wgs);
+    struct AccumulatedLet {
+      Var var;
+      PrimExpr value;
+      std::vector<Stmt> before;
+      std::vector<Stmt> after;
+    };
+    // per-wg accumulated LetDecl entries from earlier children
+    std::vector<std::vector<AccumulatedLet>> wg_accumulated_lets(num_wgs);
 
     std::vector<Stmt> segmented_stmts;
     bool first_non_let = true;
@@ -1137,23 +1144,36 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
       bool is_let_decl = IsLetDeclNode(unit->child.get());
 
       if (is_let_decl) {
-        // Extract LetDecl {var, value} from each wg's filtered result
+        // Extract LetDecl {var, value, before, after} from each wg's filtered
+        // result.  The surrounding before/after live on the cloned
+        // ScheduleUnit wrapping the LetDecl task.
         for (size_t i = 0; i < num_wgs; ++i) {
-          if (wg_children[i][ci]) {
-            // wg_children[i][ci] is a ScheduleUnit wrapping a TaskNode
-            IRStructure *inner = wg_children[i][ci].get();
-            TaskNode *task = nullptr;
-            if (inner->IsScheduleUnit()) {
-              task = static_cast<TaskNode *>(
-                  static_cast<ScheduleUnit *>(inner)->child.get());
-            } else if (inner->IsTask()) {
-              task = static_cast<TaskNode *>(inner);
+          if (!wg_children[i][ci])
+            continue;
+          IRStructure *inner = wg_children[i][ci].get();
+          TaskNode *task = nullptr;
+          std::vector<Stmt> before_stmts;
+          std::vector<Stmt> after_stmts;
+          if (inner->IsScheduleUnit()) {
+            auto wg_unit = static_cast<ScheduleUnit *>(inner);
+            task = static_cast<TaskNode *>(wg_unit->child.get());
+            auto it_before = wg_unit->before.find(static_cast<int>(i));
+            if (it_before != wg_unit->before.end()) {
+              before_stmts = it_before->second;
             }
-            if (task && !task->stmts.empty()) {
-              const auto *let = task->stmts[0].as<LetStmtNode>();
-              if (let) {
-                wg_accumulated_lets[i].push_back({let->var, let->value});
-              }
+            auto it_after = wg_unit->after.find(static_cast<int>(i));
+            if (it_after != wg_unit->after.end()) {
+              after_stmts = it_after->second;
+            }
+          } else if (inner->IsTask()) {
+            task = static_cast<TaskNode *>(inner);
+          }
+          if (task && !task->stmts.empty()) {
+            const auto *let = task->stmts[0].as<LetStmtNode>();
+            if (let) {
+              wg_accumulated_lets[i].push_back({let->var, let->value,
+                                                std::move(before_stmts),
+                                                std::move(after_stmts)});
             }
           }
         }
@@ -1178,8 +1198,23 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
         // Wrap with accumulated LetDecl bindings (innermost first)
         for (int j = static_cast<int>(wg_accumulated_lets[i].size()) - 1;
              j >= 0; --j) {
-          wg_stmts[i] = LetStmt(wg_accumulated_lets[i][j].first,
-                                wg_accumulated_lets[i][j].second, wg_stmts[i]);
+          const AccumulatedLet &acc = wg_accumulated_lets[i][j];
+          Stmt body = wg_stmts[i];
+          if (!acc.after.empty()) {
+            std::vector<Stmt> tmp = acc.after;
+            if (!IsEvaluateZero(body)) {
+              tmp.push_back(body);
+            }
+            body = SeqStmt::Flatten(tmp);
+          }
+          Stmt let_stmt = LetStmt(acc.var, acc.value, body);
+          if (!acc.before.empty()) {
+            std::vector<Stmt> tmp = acc.before;
+            tmp.push_back(let_stmt);
+            wg_stmts[i] = SeqStmt::Flatten(tmp);
+          } else {
+            wg_stmts[i] = let_stmt;
+          }
         }
       }
 
