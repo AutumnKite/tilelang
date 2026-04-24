@@ -770,6 +770,52 @@ static void InsertSynchronization(
   for (auto unit : units) {
     for (int wg_id = 0; wg_id < num_wgs; ++wg_id) {
       auto sync_it = sync_infos.find({unit, wg_id});
+      int barrier_versions = 1;
+      if (sync_it != sync_infos.end()) {
+        for (const auto &[waiting_unit_info, sync_infos] : sync_it->second) {
+          for (const auto &sync_info : sync_infos) {
+            barrier_versions =
+                std::max(barrier_versions, sync_info.buffer_versions);
+          }
+        }
+      }
+      Buffer barrier_buffer;
+      // Handle single special task, such as TCGEN05 or TMA load, that requires
+      // a barrier for itself.
+      if (auto task = GetInnerTask(unit)) {
+        int task_wg_id = task->GetWarpgroupId();
+        if (task->is_TCGEN05() && task_wg_id == wg_id) {
+          int barrier_id = next_barrier_id++;
+          barrier_buffer = makeBarrierBuffer(
+              1, "tcgen05_barrier_" + std::to_string(barrier_id),
+              barrier_versions, barrier_buffers, barrier_map);
+          PrimExpr version_index =
+              indexmod(loop_info.CalculateIterationCount(), barrier_versions);
+          PrimExpr mbar_expr = BufferLoad(barrier_buffer, {version_index});
+          RewriteGemmMbar(task, mbar_expr);
+          // TODO: need to change the lower of tcgen05_gemm to check if there is
+          // already a arrive statement. Then we can manually insert the arrive
+          // statement to deal with the case where the tcgen05_gemm is inside an
+          // if condition.
+          /*
+          Stmt arrive_stmt =
+              makeTcgen05MmaArrive(barrier_buffer, version_index);
+          InsertStatementIntoScheduleUnit(unit, arrive_stmt, false, wg_id);
+          */
+        }
+        if (task->HasTMALoad() && task_wg_id == wg_id) {
+          int barrier_id = next_barrier_id++;
+          barrier_buffer = makeBarrierBuffer(
+              thread_count[wg_id], "tma_barrier_" + std::to_string(barrier_id),
+              barrier_versions, barrier_buffers, barrier_map);
+          PrimExpr version_index =
+              indexmod(loop_info.CalculateIterationCount(), barrier_versions);
+          PrimExpr mbar_expr = BufferLoad(barrier_buffer, {version_index});
+          RewriteCopyMbar(task, mbar_expr);
+          Stmt arrive_stmt = makeBarrierArrive(mbar_expr);
+          InsertStatementIntoScheduleUnit(unit, arrive_stmt, false, wg_id);
+        }
+      }
       if (sync_it == sync_infos.end())
         continue;
       const auto &wait_map = sync_it->second;
@@ -850,50 +896,6 @@ static void InsertSynchronization(
                 Evaluate(Call(DataType::Handle(), wait_wgmma(), {0}));
             InsertStatementIntoScheduleUnit(unit, wait_stmt, false, wg_id);
           }
-        }
-      }
-      int barrier_versions = 1;
-      for (const auto &[waiting_unit_info, sync_infos] : wait_map) {
-        for (const auto &sync_info : sync_infos) {
-          barrier_versions =
-              std::max(barrier_versions, sync_info.buffer_versions);
-        }
-      }
-      Buffer barrier_buffer;
-      // Handle single special task, such as TCGEN05 or TMA load, that requires
-      // a barrier for itself.
-      if (auto task = GetInnerTask(unit)) {
-        int task_wg_id = task->GetWarpgroupId();
-        if (task->is_TCGEN05() && task_wg_id == wg_id) {
-          int barrier_id = next_barrier_id++;
-          barrier_buffer = makeBarrierBuffer(
-              1, "tcgen05_barrier_" + std::to_string(barrier_id),
-              barrier_versions, barrier_buffers, barrier_map);
-          PrimExpr version_index =
-              indexmod(loop_info.CalculateIterationCount(), barrier_versions);
-          PrimExpr mbar_expr = BufferLoad(barrier_buffer, {version_index});
-          RewriteGemmMbar(task, mbar_expr);
-          // TODO: need to change the lower of tcgen05_gemm to check if there is
-          // already a arrive statement. Then we can manually insert the arrive
-          // statement to deal with the case where the tcgen05_gemm is inside an
-          // if condition.
-          /*
-          Stmt arrive_stmt =
-              makeTcgen05MmaArrive(barrier_buffer, version_index);
-          InsertStatementIntoScheduleUnit(unit, arrive_stmt, false, wg_id);
-          */
-        }
-        if (task->HasTMALoad() && task_wg_id == wg_id) {
-          int barrier_id = next_barrier_id++;
-          barrier_buffer = makeBarrierBuffer(
-              thread_count[wg_id], "tma_barrier_" + std::to_string(barrier_id),
-              barrier_versions, barrier_buffers, barrier_map);
-          PrimExpr version_index =
-              indexmod(loop_info.CalculateIterationCount(), barrier_versions);
-          PrimExpr mbar_expr = BufferLoad(barrier_buffer, {version_index});
-          RewriteCopyMbar(task, mbar_expr);
-          Stmt arrive_stmt = makeBarrierArrive(mbar_expr);
-          InsertStatementIntoScheduleUnit(unit, arrive_stmt, false, wg_id);
         }
       }
       auto check_need_barrier = [&](ScheduleUnit *waiting_unit,
