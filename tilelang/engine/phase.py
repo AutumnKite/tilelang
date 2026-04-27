@@ -154,6 +154,40 @@ def module_uses_thread_var(mod: IRModule) -> bool:
     return False
 
 
+def module_has_runtime_pointer_tensor(mod: IRModule) -> bool:
+    """Detect ``T.make_tensor(<runtime ptr>, ...)`` style base addresses."""
+    from tvm.ir import PointerType
+    from tvm.tir import stmt_functor
+
+    for _, func in mod.functions.items():
+        if not isinstance(func, tir.PrimFunc):
+            continue
+
+        found = [False]
+
+        def _check(node, _found=found):
+            if _found[0]:
+                return
+            if not isinstance(node, tir.LetStmt):
+                return
+            var = node.var
+            ann = getattr(var, "type_annotation", None)
+            if not isinstance(ann, PointerType):
+                return
+            scope = getattr(ann, "storage_scope", "") or ""
+            if scope != "global":
+                return
+            value = node.value
+            if isinstance(value, tir.Call) and getattr(value.op, "name", "") == "tir.reinterpret":
+                _found[0] = True
+
+        stmt_functor.post_order_visit(func.body, _check)
+        if found[0]:
+            return True
+
+    return False
+
+
 def allow_vectorize(pass_ctx: PassContext | None = None) -> bool:
     if pass_ctx is None:
         pass_ctx = tilelang.transform.get_pass_context()
@@ -320,12 +354,21 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.InjectAssumes()(mod)
     # Simplify the IR expressions
     mod = tilelang.transform.Simplify()(mod)
-    if allow_autoschedule(target=target) and not module_uses_thread_var(mod) and not module_has_barrier(mod):
+    if (
+        allow_autoschedule(target=target)
+        and not module_uses_thread_var(mod)
+        and not module_has_barrier(mod)
+        and not module_has_runtime_pointer_tensor(mod)
+    ):
         # Auto schedule for high-level operations.
         # Skip when the kernel already manages explicit mbarriers
         # (alloc_barrier / alloc_cluster_barrier), because reordering the
         # rewrites breaks invariants that later barrier lowering and the
         # WS / pipelined TMA copy pipeline rely on.
+        # Also skip when the kernel uses ``T.make_tensor`` runtime-bound
+        # base addresses (ptr-backed grouped GEMM): promoting their copies
+        # to TMA would lift descriptor creation past the LetStmt that
+        # defines the base ``Var``, breaking ``MakePackedAPI``.
         mod = tilelang.transform.IfConditionExtract()(mod)
         mod = tilelang.transform.AutoSchedule(False)(mod)
         mod = tilelang.transform.Simplify()(mod)
