@@ -623,6 +623,29 @@ AssignWarpgroupIdsGlobal(IRStructure *root, const WarpSpecializeConfig &config,
     LOG(FATAL) << "No task";
   }
 
+  bool enable_partition = config.enable_warpgroup_partition;
+  if (auto thread_count_num = as_const_int(thread_count)) {
+    if (config.enable_warp_partition) {
+      enable_partition &= (*thread_count_num >= 64);
+    } else {
+      enable_partition &= (*thread_count_num % 32 == 0);
+    }
+  } else {
+    enable_partition = false;
+  }
+
+  if (!enable_partition) {
+    for (auto &task_ctx : all_tasks) {
+      TaskNode *task = task_ctx.task;
+      if (task->ContainsLoopBreak()) {
+        task->SetWarpgroupId(kWarpgroupBroadcast);
+      } else {
+        task->SetWarpgroupId(0);
+      }
+    }
+    return {thread_count};
+  }
+
   int n = all_tasks.size();
 
   for (auto &task_ctx : all_tasks) {
@@ -1010,6 +1033,29 @@ NaiveAssignWarpgroupIds(IRStructure *root, const WarpSpecializeConfig &config,
   if (all_tasks.empty())
     LOG(FATAL) << "No task";
 
+  bool enable_partition = config.enable_warpgroup_partition;
+  if (auto thread_count_num = as_const_int(thread_count)) {
+    if (config.enable_warp_partition) {
+      enable_partition &= (*thread_count_num >= 64);
+    } else {
+      enable_partition &= (*thread_count_num % 32 == 0);
+    }
+  } else {
+    enable_partition = false;
+  }
+
+  if (!enable_partition) {
+    for (auto &task_ctx : all_tasks) {
+      TaskNode *task = task_ctx.task;
+      if (task->ContainsLoopBreak()) {
+        task->SetWarpgroupId(kWarpgroupBroadcast);
+      } else {
+        task->SetWarpgroupId(0);
+      }
+    }
+    return {thread_count};
+  }
+
   // Simple producer/consumer assignment:
   // TMA tasks → wg1 (producer), compute tasks → wg0 (consumer)
   for (auto &task_ctx : all_tasks) {
@@ -1025,7 +1071,7 @@ NaiveAssignWarpgroupIds(IRStructure *root, const WarpSpecializeConfig &config,
     }
   }
 
-  if (config.producer_thread_count == 32) {
+  if (config.enable_warp_partition) {
     // Collect prefix/suffix tasks and reset them to neutral
     std::unordered_set<TaskNode *> prefix_tasks;
     CollectPrefixTasks(root, prefix_tasks);

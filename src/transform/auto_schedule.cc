@@ -692,7 +692,6 @@ struct ScheduledKernelResult {
   std::vector<MultiVersionBufferInfo> buffer_infos;
   std::vector<Buffer> duplicated_fragment_buffers;
   PrimExpr updated_thread_extent;
-  bool did_warpgroup_partition{false};
 };
 
 // Schedule a single kernel body (the logic previously inlined in AutoSchedule).
@@ -740,14 +739,6 @@ ScheduleSingleKernel(const Stmt &kernel_body, IterVar thread_var, Target target,
     thread_count = unit_builder.Build(ir_structure);
   }
 
-  if (!config.enable_warpgroup_partition) {
-    result.scheduled_body =
-        ConvertIRStructureToStmt(ir_structure.get(), enable_epi);
-    result.scheduled_body = StripUnusedLetStmts(result.scheduled_body);
-    result.did_warpgroup_partition = false;
-    return result;
-  }
-
   // Print the modified summary view
   // PrintIRStructure(ir_structure.get());
 
@@ -771,7 +762,6 @@ ScheduleSingleKernel(const Stmt &kernel_body, IterVar thread_var, Target target,
       ir_structure.get(), thread_var, result.barrier_buffers,
       result.barrier_map, enable_epi, thread_count, config,
       neutral_sync_shared_barrier, result.duplicated_fragment_buffers);
-  result.did_warpgroup_partition = true;
   return result;
 }
 
@@ -868,27 +858,25 @@ tvm::transform::Pass AutoSchedule(const bool enable_epi) {
       TilelangRootBodyReplacer replacer(kr.scheduled_body);
       final_body = replacer(func->body);
 
-      if (kr.did_warpgroup_partition) {
-        // Apply thread extent update if warpgroup partition was applied
-        // (sm_90 only)
-        if (config.enable_thread_extend) {
-          ThreadExtentUpdater extent_updater(kr.updated_thread_extent);
-          final_body = extent_updater(final_body);
-        }
-        // Add barrier buffers to tilelang_root block's alloc_buffers
-        if (!kr.barrier_buffers.empty() ||
-            !kr.duplicated_fragment_buffers.empty()) {
-          std::vector<Buffer> all_alloc_buffers = kr.barrier_buffers;
-          all_alloc_buffers.insert(all_alloc_buffers.end(),
-                                   kr.duplicated_fragment_buffers.begin(),
-                                   kr.duplicated_fragment_buffers.end());
-          final_body = AddBarrierBuffersToRoot(final_body, all_alloc_buffers,
-                                               kr.barrier_map);
-        }
-        // Apply multi-version alloc_buffer rewrite if needed
-        if (!kr.buffer_infos.empty()) {
-          final_body = RewriteAllocBuffers(final_body, kr.buffer_infos);
-        }
+      // Apply thread extent update if warpgroup partition was applied
+      // (sm_90 only)
+      if (config.enable_thread_extend) {
+        ThreadExtentUpdater extent_updater(kr.updated_thread_extent);
+        final_body = extent_updater(final_body);
+      }
+      // Add barrier buffers to tilelang_root block's alloc_buffers
+      if (!kr.barrier_buffers.empty() ||
+          !kr.duplicated_fragment_buffers.empty()) {
+        std::vector<Buffer> all_alloc_buffers = kr.barrier_buffers;
+        all_alloc_buffers.insert(all_alloc_buffers.end(),
+                                 kr.duplicated_fragment_buffers.begin(),
+                                 kr.duplicated_fragment_buffers.end());
+        final_body = AddBarrierBuffersToRoot(final_body, all_alloc_buffers,
+                                             kr.barrier_map);
+      }
+      // Apply multi-version alloc_buffer rewrite if needed
+      if (!kr.buffer_infos.empty()) {
+        final_body = RewriteAllocBuffers(final_body, kr.buffer_infos);
       }
 
       final_body = ReNestLetStmts(final_body);
@@ -952,28 +940,26 @@ tvm::transform::Pass AutoSchedule(const bool enable_epi) {
         scheduled_subtree = replacer(kernel_subtree);
       }
 
-      if (kr.did_warpgroup_partition) {
-        // Apply thread extent update if warpgroup partition was applied
-        // (sm_90 only)
-        if (config.enable_thread_extend) {
-          ThreadExtentUpdater extent_updater(kr.updated_thread_extent);
-          scheduled_subtree = extent_updater(scheduled_subtree);
-        }
-        // Add barrier buffers to this kernel's tilelang_root block
-        if (!kr.barrier_buffers.empty() ||
-            !kr.duplicated_fragment_buffers.empty()) {
-          std::vector<Buffer> all_alloc_buffers = kr.barrier_buffers;
-          all_alloc_buffers.insert(all_alloc_buffers.end(),
-                                   kr.duplicated_fragment_buffers.begin(),
-                                   kr.duplicated_fragment_buffers.end());
-          scheduled_subtree = AddBarrierBuffersToRoot(
-              scheduled_subtree, all_alloc_buffers, kr.barrier_map);
-        }
-        // Apply multi-version alloc_buffer rewrite if needed
-        if (!kr.buffer_infos.empty()) {
-          scheduled_subtree =
-              RewriteAllocBuffers(scheduled_subtree, kr.buffer_infos);
-        }
+      // Apply thread extent update if warpgroup partition was applied
+      // (sm_90 only)
+      if (config.enable_thread_extend) {
+        ThreadExtentUpdater extent_updater(kr.updated_thread_extent);
+        scheduled_subtree = extent_updater(scheduled_subtree);
+      }
+      // Add barrier buffers to this kernel's tilelang_root block
+      if (!kr.barrier_buffers.empty() ||
+          !kr.duplicated_fragment_buffers.empty()) {
+        std::vector<Buffer> all_alloc_buffers = kr.barrier_buffers;
+        all_alloc_buffers.insert(all_alloc_buffers.end(),
+                                 kr.duplicated_fragment_buffers.begin(),
+                                 kr.duplicated_fragment_buffers.end());
+        scheduled_subtree = AddBarrierBuffersToRoot(
+            scheduled_subtree, all_alloc_buffers, kr.barrier_map);
+      }
+      // Apply multi-version alloc_buffer rewrite if needed
+      if (!kr.buffer_infos.empty()) {
+        scheduled_subtree =
+            RewriteAllocBuffers(scheduled_subtree, kr.buffer_infos);
       }
 
       // Insert shared memory boundary between kernel segments
