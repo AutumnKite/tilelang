@@ -1064,7 +1064,7 @@ NaiveAssignWarpgroupIds(IRStructure *root, const WarpSpecializeConfig &config,
       task->SetWarpgroupId(kWarpgroupBroadcast);
       continue;
     }
-    if (task->UsesTMACore() && !task->UsesTensorCore()) {
+    if (task->HasTMALoad()) {
       task->SetWarpgroupId(1); // producer
     } else {
       task->SetWarpgroupId(0); // consumer
@@ -1134,20 +1134,17 @@ void ScheduleUnitBuilder::NaiveScheduleLoop(ControlNode *ctrl) {
 
   // Assign pipeline stages and start times:
   // - TMA load → stage 0, start_time = 0
-  // - Everything else → stage (num_stages - 1), start_time = num_stages
+  // - Everything else → stage (num_stages), start_time = num_stages
   // - All task latencies set to 0, IIperIter = 1
   std::map<IRStructure *, int> stage_map;
   bool has_promoted = false;
   for (auto &child : seq_body->children) {
     IRStructure *node = child.get();
     bool is_tma_load =
-        node->UsesTMACore() && !node->UsesTensorCore() && !node->UsesCUDACore();
-    if (is_tma_load && node->IsTask()) {
-      is_tma_load = static_cast<TaskNode *>(node)->HasTMALoad();
-    }
+        node->IsTask() && static_cast<TaskNode *>(node)->HasTMALoad();
     int stage = !is_tma_load ? 0 : (num_stages);
     stage_map[node] = stage;
-    if (stage != num_stages) {
+    if (stage != 0) {
       has_promoted = true;
     }
     node->SetStartTime(is_tma_load ? 0 : num_stages);
