@@ -154,6 +154,40 @@ def module_uses_thread_var(mod: IRModule) -> bool:
     return False
 
 
+def module_has_runtime_pointer_tensor(mod: IRModule) -> bool:
+    """Detect ``T.make_tensor(<runtime ptr>, ...)`` style base addresses."""
+    from tvm.ir import PointerType
+    from tvm.tir import stmt_functor
+
+    for _, func in mod.functions.items():
+        if not isinstance(func, tir.PrimFunc):
+            continue
+
+        found = [False]
+
+        def _check(node, _found=found):
+            if _found[0]:
+                return
+            if not isinstance(node, tir.LetStmt):
+                return
+            var = node.var
+            ann = getattr(var, "type_annotation", None)
+            if not isinstance(ann, PointerType):
+                return
+            scope = getattr(ann, "storage_scope", "") or ""
+            if scope != "global":
+                return
+            value = node.value
+            if isinstance(value, tir.Call) and getattr(value.op, "name", "") == "tir.reinterpret":
+                _found[0] = True
+
+        stmt_functor.post_order_visit(func.body, _check)
+        if found[0]:
+            return True
+
+    return False
+
+
 def allow_vectorize(pass_ctx: PassContext | None = None) -> bool:
     if pass_ctx is None:
         pass_ctx = tilelang.transform.get_pass_context()
@@ -221,6 +255,13 @@ def should_enable_race_check(pass_ctx: PassContext | None = None) -> bool:
     return enabled
 
 
+def should_enable_prelower_semantic_check(pass_ctx: PassContext | None = None) -> bool:
+    if pass_ctx is None:
+        pass_ctx = tilelang.transform.get_pass_context()
+    enabled = not pass_ctx.config.get(tilelang.PassConfigKey.TL_DISABLE_PRELOWER_SEMANTIC_CHECK, False)
+    return enabled
+
+
 def get_layout_visual_formats(pass_ctx: PassContext | None = None) -> list[str]:
     if pass_ctx is None:
         pass_ctx = tilelang.transform.get_pass_context()
@@ -262,6 +303,9 @@ def PreLowerSemanticCheck(mod: IRModule) -> None:
     in Python side instead of letting the error dive into the complicated TVM/C++ stack.
     Note: This is a validation-only pipeline of passes and does not modify or return the module.
     """
+
+    if not should_enable_prelower_semantic_check():
+        return
 
     # Print AST for debugging purpose
     if should_enable_ast_print():
@@ -310,12 +354,21 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.InjectAssumes()(mod)
     # Simplify the IR expressions
     mod = tilelang.transform.Simplify()(mod)
-    if allow_autoschedule(target=target) and not module_uses_thread_var(mod) and not module_has_barrier(mod):
+    if (
+        allow_autoschedule(target=target)
+        and not module_uses_thread_var(mod)
+        and not module_has_barrier(mod)
+        and not module_has_runtime_pointer_tensor(mod)
+    ):
         # Auto schedule for high-level operations.
         # Skip when the kernel already manages explicit mbarriers
         # (alloc_barrier / alloc_cluster_barrier), because reordering the
         # rewrites breaks invariants that later barrier lowering and the
         # WS / pipelined TMA copy pipeline rely on.
+        # Also skip when the kernel uses ``T.make_tensor`` runtime-bound
+        # base addresses (ptr-backed grouped GEMM): promoting their copies
+        # to TMA would lift descriptor creation past the LetStmt that
+        # defines the base ``Var``, breaking ``MakePackedAPI``.
         mod = tilelang.transform.IfConditionExtract()(mod)
         mod = tilelang.transform.AutoSchedule(False)(mod)
         mod = tilelang.transform.Simplify()(mod)
@@ -335,11 +388,7 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     # Run pipeline planning and software-pipeline rewriting before layout
     # inference so inferred layouts see the final pipelined structure directly.
     mod = tilelang.transform.PipelinePlanning()(mod)
-    # print("After pipeline planing")
-    # print(mod)
     mod = tilelang.transform.InjectSoftwarePipeline()(mod)
-    # print("After InjectSoftwarePipeline")
-    # print(mod)
     mod = tilelang.transform.Simplify()(mod)
     # Infer memory layouts for fragments and shared memory
     mod = tilelang.transform.LayoutInference()(mod)
