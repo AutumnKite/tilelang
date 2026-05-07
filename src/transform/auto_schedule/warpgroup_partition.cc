@@ -800,19 +800,6 @@ Stmt ConvertIRStructureToStmt(IRStructure *structure,
 
     for (auto &child : seq->children) {
       auto unit = static_cast<ScheduleUnit *>(child.get());
-      std::vector<Stmt> stmts;
-      for (const auto &[_, before] : unit->before) {
-        for (const auto &stmt : before) {
-          stmts.push_back(stmt);
-        }
-      }
-      stmts.push_back(
-          ConvertIRStructureToStmt(unit->child.get(), outer_enable_epi));
-      for (const auto &[_, after] : unit->after) {
-        for (const auto &stmt : after) {
-          stmts.push_back(stmt);
-        }
-      }
       Map<Var, PrimExpr> substitution, substitution_cond;
       substitution.Set(loop_var,
                        loop_var - loop_step * (max_stages - unit->stage));
@@ -820,17 +807,45 @@ Stmt ConvertIRStructureToStmt(IRStructure *structure,
           loop_var, Max(loop_start, Min(loop_start + loop_extent - loop_step,
                                         loop_var - loop_step * (max_stages -
                                                                 unit->stage))));
+      PrimExpr condition =
+          And(loop_var < loop_start + loop_extent, loop_var >= loop_start);
+      if (unit->stage == min_stages) {
+        condition = loop_var >= loop_start;
+      }
+      if (unit->stage == max_stages) {
+        condition = loop_var < loop_start + loop_extent;
+      }
       if (IsLetDeclNode(unit->child.get())) {
-        Stmt stmt = SeqStmt::Flatten(stmts);
-        steady.push_back(Substitute(stmt, substitution_cond));
-      } else {
-        PrimExpr condition =
-            And(loop_var < loop_start + loop_extent, loop_var >= loop_start);
-        if (unit->stage == min_stages) {
-          condition = loop_var >= loop_start;
+        std::vector<Stmt> guarded;
+        for (const auto &[_, before] : unit->before) {
+          for (const auto &stmt : before) {
+            guarded.push_back(
+                Substitute(IfThenElse(condition, stmt), substitution));
+          }
         }
-        if (unit->stage == max_stages) {
-          condition = loop_var < loop_start + loop_extent;
+        guarded.push_back(Substitute(
+            ConvertIRStructureToStmt(unit->child.get(), outer_enable_epi),
+            substitution_cond));
+        for (const auto &[_, after] : unit->after) {
+          for (const auto &stmt : after) {
+            guarded.push_back(
+                Substitute(IfThenElse(condition, stmt), substitution));
+          }
+        }
+        steady.push_back(SeqStmt::Flatten(guarded));
+      } else {
+        std::vector<Stmt> stmts;
+        for (const auto &[_, before] : unit->before) {
+          for (const auto &stmt : before) {
+            stmts.push_back(stmt);
+          }
+        }
+        stmts.push_back(
+            ConvertIRStructureToStmt(unit->child.get(), outer_enable_epi));
+        for (const auto &[_, after] : unit->after) {
+          for (const auto &stmt : after) {
+            stmts.push_back(stmt);
+          }
         }
         Stmt stmt = IfThenElse(condition, SeqStmt::Flatten(stmts));
         steady.push_back(Substitute(stmt, substitution));
@@ -1114,10 +1129,11 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
   }
 
   // --- Per-child construction ---
-  // Walk root SequenceNode's children.  LetDecl children accumulate as
-  // (var, value, before_stmts, after_stmts) tuples so that the cloned
-  // before/after barriers on their ScheduleUnit are preserved.  When wrapping
-  // a subsequent non-LetDecl child, each accumulated tuple is re-emitted as
+  // Walk root SequenceNode's children.  LetDecl children are normally
+  // accumulated as (var, value, before_stmts, after_stmts) tuples so that the
+  // cloned before/after barriers on their ScheduleUnit are preserved.  When
+  // wrapping a subsequent non-LetDecl child, each accumulated tuple is
+  // re-emitted as
   //     <before_stmts> ; let var = value in (<after_stmts> ; body)
   // so the barrier pair brackets the let binding while `var` stays in scope
   // for the rest of the segment.
@@ -1126,6 +1142,86 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
   if (root->IsSequence()) {
     auto root_seq = static_cast<SequenceNode *>(root);
     size_t num_children = root_seq->children.size();
+
+    std::vector<std::unordered_set<const BufferNode *>> child_read_bufs(
+        num_children);
+    std::vector<std::unordered_set<const BufferNode *>> child_write_bufs(
+        num_children);
+    std::vector<std::unordered_set<const VarNode *>> child_read_vars(
+        num_children);
+    std::vector<std::unordered_set<const VarNode *>> child_write_vars(
+        num_children);
+    for (size_t ci = 0; ci < num_children; ++ci) {
+      IRStructure *c = root_seq->children[ci].get();
+      if (!c)
+        continue;
+      for (const auto &r : c->GetReadRegions()) {
+        child_read_bufs[ci].insert(r->buffer.get());
+      }
+      for (const auto &r : c->GetWriteRegions()) {
+        child_write_bufs[ci].insert(r->buffer.get());
+      }
+      for (const auto &v : c->GetReadVars()) {
+        child_read_vars[ci].insert(v.get());
+      }
+      for (const auto &v : c->GetWriteVars()) {
+        child_write_vars[ci].insert(v.get());
+      }
+    }
+
+    std::vector<int> anchor_end(num_children, -1);
+    for (size_t i = 0; i < num_children; ++i) {
+      auto unit_i = static_cast<ScheduleUnit *>(root_seq->children[i].get());
+      if (!unit_i || !IsLetDeclNode(unit_i->child.get()))
+        continue;
+      const auto &rb = child_read_bufs[i];
+      const auto &rv = child_read_vars[i];
+      int j_max = -1;
+      for (size_t j = i + 1; j < num_children; ++j) {
+        bool conflict = false;
+        for (const auto *wb : child_write_bufs[j]) {
+          if (rb.count(wb)) {
+            conflict = true;
+            break;
+          }
+        }
+        if (!conflict) {
+          for (const auto *wv : child_write_vars[j]) {
+            if (rv.count(wv)) {
+              conflict = true;
+              break;
+            }
+          }
+        }
+        if (conflict)
+          j_max = static_cast<int>(j);
+      }
+      anchor_end[i] = j_max;
+    }
+
+    std::vector<int> cluster_end(num_children, -1);
+    {
+      size_t i = 0;
+      while (i < num_children) {
+        if (anchor_end[i] < 0) {
+          ++i;
+          continue;
+        }
+        int e = anchor_end[i];
+        bool extended = true;
+        while (extended) {
+          extended = false;
+          for (int k = static_cast<int>(i) + 1; k <= e; ++k) {
+            if (anchor_end[k] > e) {
+              e = anchor_end[k];
+              extended = true;
+            }
+          }
+        }
+        cluster_end[i] = e;
+        i = static_cast<size_t>(e) + 1;
+      }
+    }
 
     struct AccumulatedLet {
       Var var;
@@ -1143,6 +1239,89 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
     for (size_t ci = 0; ci < num_children; ++ci) {
       auto unit = static_cast<ScheduleUnit *>(root_seq->children[ci].get());
       bool is_let_decl = IsLetDeclNode(unit->child.get());
+
+      if (cluster_end[ci] >= 0) {
+        size_t end = static_cast<size_t>(cluster_end[ci]);
+
+        bool cluster_contains_loop = false;
+        for (size_t cj = ci; cj <= end; ++cj) {
+          auto u = static_cast<ScheduleUnit *>(root_seq->children[cj].get());
+          if (u && u->child && u->child->IsControl()) {
+            cluster_contains_loop = true;
+            break;
+          }
+        }
+
+        std::vector<std::vector<Stmt>> wg_stmt_seq(num_wgs);
+        for (size_t i = 0; i < num_wgs; ++i) {
+          for (size_t cj = ci; cj <= end; ++cj) {
+            if (!wg_children[i][cj])
+              continue;
+            auto tmp_seq = std::make_shared<SequenceNode>();
+            tmp_seq->children.push_back(wg_children[i][cj]);
+            Stmt s = ConvertIRStructureToStmt(tmp_seq.get(), outer_enable_epi);
+            if (!IsEvaluateZero(s)) {
+              wg_stmt_seq[i].push_back(s);
+            }
+          }
+        }
+
+        std::vector<Stmt> wg_stmts(num_wgs);
+        bool all_empty = true;
+        for (size_t i = 0; i < num_wgs; ++i) {
+          if (wg_stmt_seq[i].empty()) {
+            wg_stmts[i] = Evaluate(0);
+          } else {
+            wg_stmts[i] = SeqStmt::Flatten(wg_stmt_seq[i]);
+            all_empty = false;
+          }
+          for (int j = static_cast<int>(wg_accumulated_lets[i].size()) - 1;
+               j >= 0; --j) {
+            const AccumulatedLet &acc = wg_accumulated_lets[i][j];
+            Stmt body = wg_stmts[i];
+            if (!acc.after.empty()) {
+              std::vector<Stmt> tmp = acc.after;
+              if (!IsEvaluateZero(body)) {
+                tmp.push_back(body);
+              }
+              body = SeqStmt::Flatten(tmp);
+            }
+            Stmt let_stmt = LetStmt(acc.var, acc.value, body);
+            if (!acc.before.empty()) {
+              std::vector<Stmt> tmp = acc.before;
+              tmp.push_back(let_stmt);
+              wg_stmts[i] = SeqStmt::Flatten(tmp);
+            } else {
+              wg_stmts[i] = let_stmt;
+            }
+          }
+        }
+
+        if (!all_empty) {
+          if (prev_was_loop || cluster_contains_loop) {
+            segmented_stmts.push_back(
+                AttrStmt(Integer(0), attr::kAutoScheduleSharedMemoryBoundary, 0,
+                         Evaluate(0)));
+          }
+          if (first_non_let && !has_simt_copy && !has_inner_nreg_decision &&
+              num_wgs == 2 && config.enable_set_max_nreg) {
+            for (size_t i = 0; i < num_wgs; ++i) {
+              wg_stmts[i] = SeqStmt(
+                  {Evaluate(Call(DataType::Handle(), tl::set_max_nreg(),
+                                 {i == 0 ? config.consumer_max_nreg
+                                         : config.producer_max_nreg,
+                                  static_cast<int>(!i)})),
+                   wg_stmts[i]});
+            }
+          }
+          first_non_let = false;
+          segmented_stmts.push_back(MakeWarpgroupIf(wg_stmts));
+          prev_was_loop = cluster_contains_loop;
+        }
+
+        ci = end;
+        continue;
+      }
 
       if (is_let_decl) {
         // Extract LetDecl {var, value, before, after} from each wg's filtered
