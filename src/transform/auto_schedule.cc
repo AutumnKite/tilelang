@@ -755,7 +755,7 @@ ScheduleSingleKernel(const Stmt &kernel_body, IterVar thread_var, Target target,
   AnalyzeAndInsertBarriers(ir_structure.get(), next_barrier_id,
                            result.barrier_buffers, result.barrier_map,
                            thread_count, loop_info, result.buffer_infos,
-                           neutral_sync_shared_barrier);
+                           neutral_sync_shared_barrier, /*is_root=*/true);
 
   // Apply warpgroup partition to entire IRStructure
   result.scheduled_body = ApplyWarpgroupPartitionToIRStructure(

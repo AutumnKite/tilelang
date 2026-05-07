@@ -148,30 +148,27 @@ struct MultiVersionBufferInfo {
 };
 
 // Barrier dependency analysis function declarations
-static void
-AnalyzeAndInsertBarriers(IRStructure *node, int &next_barrier_id,
-                         std::vector<Buffer> &barrier_buffers,
-                         Map<ObjectRef, ObjectRef> &barrier_map,
-                         const std::vector<PrimExpr> &thread_count,
-                         LoopNestingInfo &loop_info,
-                         std::vector<MultiVersionBufferInfo> &buffer_infos,
-                         Buffer neutral_sync_shared_barrier);
-static void
-AnalyzeSequenceNodeBarriers(SequenceNode *seq, int &next_barrier_id,
-                            std::vector<Buffer> &barrier_buffers,
-                            Map<ObjectRef, ObjectRef> &barrier_map,
-                            const std::vector<PrimExpr> &thread_count,
-                            LoopNestingInfo &loop_info,
-                            std::vector<MultiVersionBufferInfo> &buffer_infos,
-                            Buffer neutral_sync_shared_barrier);
-static void
-AnalyzeControlNodeBarriers(ControlNode *ctrl, int &next_barrier_id,
-                           std::vector<Buffer> &barrier_buffers,
-                           Map<ObjectRef, ObjectRef> &barrier_map,
-                           const std::vector<PrimExpr> &thread_count,
-                           LoopNestingInfo &loop_info,
-                           std::vector<MultiVersionBufferInfo> &buffer_infos,
-                           Buffer neutral_sync_shared_barrier);
+static void AnalyzeAndInsertBarriers(
+    IRStructure *node, int &next_barrier_id,
+    std::vector<Buffer> &barrier_buffers,
+    Map<ObjectRef, ObjectRef> &barrier_map,
+    const std::vector<PrimExpr> &thread_count, LoopNestingInfo &loop_info,
+    std::vector<MultiVersionBufferInfo> &buffer_infos,
+    Buffer neutral_sync_shared_barrier, bool is_root = false);
+static void AnalyzeSequenceNodeBarriers(
+    SequenceNode *seq, int &next_barrier_id,
+    std::vector<Buffer> &barrier_buffers,
+    Map<ObjectRef, ObjectRef> &barrier_map,
+    const std::vector<PrimExpr> &thread_count, LoopNestingInfo &loop_info,
+    std::vector<MultiVersionBufferInfo> &buffer_infos,
+    Buffer neutral_sync_shared_barrier, bool is_root = false);
+static void AnalyzeControlNodeBarriers(
+    ControlNode *ctrl, int &next_barrier_id,
+    std::vector<Buffer> &barrier_buffers,
+    Map<ObjectRef, ObjectRef> &barrier_map,
+    const std::vector<PrimExpr> &thread_count, LoopNestingInfo &loop_info,
+    std::vector<MultiVersionBufferInfo> &buffer_infos,
+    Buffer neutral_sync_shared_barrier, bool is_root = false);
 
 // Create a barrier_arrive statement for the given barrier expression
 // Equivalent to T.barrier_arrive(barrier_expr) in Python
@@ -535,7 +532,7 @@ AnalyzeAndInsertBarriers(IRStructure *node, int &next_barrier_id,
                          const std::vector<PrimExpr> &thread_count,
                          LoopNestingInfo &loop_info,
                          std::vector<MultiVersionBufferInfo> &buffer_infos,
-                         Buffer neutral_sync_shared_barrier) {
+                         Buffer neutral_sync_shared_barrier, bool is_root) {
   if (!node)
     return;
 
@@ -543,12 +540,12 @@ AnalyzeAndInsertBarriers(IRStructure *node, int &next_barrier_id,
     AnalyzeSequenceNodeBarriers(static_cast<SequenceNode *>(node),
                                 next_barrier_id, barrier_buffers, barrier_map,
                                 thread_count, loop_info, buffer_infos,
-                                neutral_sync_shared_barrier);
+                                neutral_sync_shared_barrier, is_root);
   } else if (node->IsControl()) {
     AnalyzeControlNodeBarriers(static_cast<ControlNode *>(node),
                                next_barrier_id, barrier_buffers, barrier_map,
                                thread_count, loop_info, buffer_infos,
-                               neutral_sync_shared_barrier);
+                               neutral_sync_shared_barrier, is_root);
   } else if (node->IsWrapper()) {
     auto wrapper = static_cast<WrapperNode *>(node);
     AnalyzeAndInsertBarriers(
@@ -1007,7 +1004,7 @@ AnalyzeSequenceNodeBarriers(SequenceNode *seq, int &next_barrier_id,
                             const std::vector<PrimExpr> &thread_count,
                             LoopNestingInfo &loop_info,
                             std::vector<MultiVersionBufferInfo> &buffer_infos,
-                            Buffer neutral_sync_shared_barrier) {
+                            Buffer neutral_sync_shared_barrier, bool is_root) {
   if (!seq)
     return;
 
@@ -1046,6 +1043,65 @@ AnalyzeSequenceNodeBarriers(SequenceNode *seq, int &next_barrier_id,
   auto sync_infos = GetSyncInfos(units, thread_count.size());
   InsertSynchronization(units, sync_infos, next_barrier_id, barrier_buffers,
                         barrier_map, thread_count, loop_info);
+
+  // For the root, since we will insert kAutoScheduleSharedMemoryBoundary before
+  // and after for-loop segments, we
+  // naively add barriers at these positions to ensure synchronization.
+  if (is_root) {
+    int num_wgs = thread_count.size();
+    for (const auto &unit : units) {
+      if (!unit->child->IsControl())
+        continue;
+      {
+        std::vector<Buffer> barrier_buffer(num_wgs);
+        for (int wg_id = 0; wg_id < num_wgs; ++wg_id) {
+          int barrier_id = next_barrier_id++;
+          barrier_buffer[wg_id] = makeBarrierBuffer(
+              thread_count[wg_id], "root_barrier_" + std::to_string(barrier_id),
+              1, barrier_buffers, barrier_map);
+        }
+        for (int wg_id = 0; wg_id < num_wgs; ++wg_id) {
+          for (int other_wg_id = 0; other_wg_id < num_wgs; ++other_wg_id) {
+            if (wg_id == other_wg_id)
+              continue;
+            PrimExpr mbar_expr = BufferLoad(barrier_buffer[wg_id], {0});
+            PrimExpr parity_expr = IntImm(DataType::Int(32), 0);
+            Stmt wait_stmt = makeBarrierWait(mbar_expr, parity_expr);
+            InsertStatementIntoScheduleUnit(unit, wait_stmt, true, other_wg_id);
+          }
+        }
+        for (int wg_id = 0; wg_id < num_wgs; ++wg_id) {
+          PrimExpr mbar_expr = BufferLoad(barrier_buffer[wg_id], {0});
+          Stmt arrive_stmt = makeBarrierArrive(mbar_expr);
+          InsertStatementIntoScheduleUnit(unit, arrive_stmt, true, wg_id);
+        }
+      }
+      {
+        std::vector<Buffer> barrier_buffer(num_wgs);
+        for (int wg_id = 0; wg_id < num_wgs; ++wg_id) {
+          int barrier_id = next_barrier_id++;
+          barrier_buffer[wg_id] = makeBarrierBuffer(
+              thread_count[wg_id], "root_barrier_" + std::to_string(barrier_id),
+              1, barrier_buffers, barrier_map);
+        }
+        for (int wg_id = 0; wg_id < num_wgs; ++wg_id) {
+          PrimExpr mbar_expr = BufferLoad(barrier_buffer[wg_id], {0});
+          Stmt arrive_stmt = makeBarrierArrive(mbar_expr);
+          InsertStatementIntoScheduleUnit(unit, arrive_stmt, false, wg_id);
+        }
+        for (int wg_id = 0; wg_id < num_wgs; ++wg_id) {
+          for (int other_wg_id = 0; other_wg_id < num_wgs; ++other_wg_id) {
+            if (wg_id == other_wg_id)
+              continue;
+            PrimExpr mbar_expr = BufferLoad(barrier_buffer[wg_id], {0});
+            PrimExpr parity_expr = IntImm(DataType::Int(32), 0);
+            Stmt wait_stmt = makeBarrierWait(mbar_expr, parity_expr);
+            InsertStatementIntoScheduleUnit(unit, wait_stmt, false, other_wg_id);
+          }
+        }
+      }
+    }
+  }
 }
 
 static void
@@ -1055,7 +1111,7 @@ AnalyzeControlNodeBarriers(ControlNode *ctrl, int &next_barrier_id,
                            const std::vector<PrimExpr> &thread_count,
                            LoopNestingInfo &loop_info,
                            std::vector<MultiVersionBufferInfo> &buffer_infos,
-                           Buffer neutral_sync_shared_barrier) {
+                           Buffer neutral_sync_shared_barrier, bool is_root) {
   if (!ctrl || !ctrl->child)
     return;
 
