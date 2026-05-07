@@ -1096,7 +1096,8 @@ AnalyzeSequenceNodeBarriers(SequenceNode *seq, int &next_barrier_id,
             PrimExpr mbar_expr = BufferLoad(barrier_buffer[wg_id], {0});
             PrimExpr parity_expr = IntImm(DataType::Int(32), 0);
             Stmt wait_stmt = makeBarrierWait(mbar_expr, parity_expr);
-            InsertStatementIntoScheduleUnit(unit, wait_stmt, false, other_wg_id);
+            InsertStatementIntoScheduleUnit(unit, wait_stmt, false,
+                                            other_wg_id);
           }
         }
       }

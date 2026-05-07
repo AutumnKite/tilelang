@@ -1306,12 +1306,12 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
           if (first_non_let && !has_simt_copy && !has_inner_nreg_decision &&
               num_wgs == 2 && config.enable_set_max_nreg) {
             for (size_t i = 0; i < num_wgs; ++i) {
-              wg_stmts[i] = SeqStmt(
-                  {Evaluate(Call(DataType::Handle(), tl::set_max_nreg(),
-                                 {i == 0 ? config.consumer_max_nreg
-                                         : config.producer_max_nreg,
-                                  static_cast<int>(!i)})),
-                   wg_stmts[i]});
+              wg_stmts[i] =
+                  SeqStmt({Evaluate(Call(DataType::Handle(), tl::set_max_nreg(),
+                                         {i == 0 ? config.consumer_max_nreg
+                                                 : config.producer_max_nreg,
+                                          static_cast<int>(!i)})),
+                           wg_stmts[i]});
             }
           }
           first_non_let = false;
