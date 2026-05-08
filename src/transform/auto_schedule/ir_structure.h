@@ -1042,6 +1042,9 @@ public:
   std::shared_ptr<IRStructure> Clone() const override;
 
   bool containWarpgroupId(int id) const override {
+    if (before.count(id) > 0 || after.count(id) > 0) {
+      return true;
+    }
     return child && child->containWarpgroupId(id);
   }
 
