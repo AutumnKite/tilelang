@@ -74,8 +74,6 @@ private:
       Array<PrimExpr> allocation_shape = GetBufferAllocationShape(buffer);
       body = SeqStmt({DeclBuffer(buffer), std::move(body)});
       Map<String, Any> allocate_annotations;
-      if (volatile_buffers_.count(buffer->data))
-        allocate_annotations.Set(tirx::attr::kVolatile, Bool(true));
       auto it = storage_align_.find(buffer->data);
       if (it != storage_align_.end()) {
         StorageAlignAnnotation allocate_aligns;
@@ -144,13 +142,6 @@ private:
   }
 
   Stmt VisitStmt_(const SBlockNode *op) final {
-    if (auto annotation = op->annotations.Get(tl::attr::kVolatileBuffers)) {
-      for (const auto &[var, value] :
-           annotation.value().cast<Map<Var, PrimExpr>>()) {
-        if (!is_zero(value))
-          volatile_buffers_.insert(var);
-      }
-    }
     bool was_inside_realize = inside_realize_;
     inside_realize_ = false;
     SBlock block = Downcast<SBlock>(StmtExprMutator::VisitStmt_(op));
@@ -374,8 +365,6 @@ private:
 
   /*! \brief Local var initializers collected from block annotations. */
   Map<Var, PrimExpr> local_var_init_map_;
-
-  std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual> volatile_buffers_;
 
   /*! \brief Cluster dims collected from tilelang.cluster_dims block annotation.
    */

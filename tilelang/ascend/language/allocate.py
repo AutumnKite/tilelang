@@ -36,11 +36,13 @@ def alloc_l1(shape: ShapeType, dtype: DType, scope="shared.l1") -> Buffer:
 
 
 def alloc_ss(shape: ShapeType, dtype: DType = "uint32") -> Buffer:
-    """Allocate volatile scalar storage shared by one AIC and its two AIVs.
+    """Allocate scalar storage shared by one AIC and its two AIVs.
 
     SS buffers have static shapes, uint32/uint64 elements, and 32-byte aligned
     allocation bases within the MIX 1:2 group's 3 KiB SS pool. Allocation does
     not initialize the contents. ``T.view`` may reinterpret the same storage.
+    SS follows ordinary buffer optimization semantics; unused accesses may
+    be removed. Synchronization establishes publication and slot-reuse order.
 
     The two AIVs must write disjoint byte ranges. AIV/AIC dependencies use
     ordinary automatic cross-core synchronization. Direct AIV peer dependencies
@@ -63,9 +65,7 @@ def alloc_ss(shape: ShapeType, dtype: DType = "uint32") -> Buffer:
         elements *= int(extent)
     if elements * dtype.bits // 8 > 3072:
         raise ValueError("alloc_ss exceeds the MIX 1:2 SS capacity of 3072 bytes")
-    buffer = _with_span(T.sblock_alloc_buffer(extents, str(dtype), scope="shared.ss"))
-    sblock_attr({"tl.volatile_buffers": {buffer.data: True}})
-    return buffer
+    return _with_span(T.sblock_alloc_buffer(extents, str(dtype), scope="shared.ss"))
 
 
 def alloc_l0a(shape: ShapeType, dtype: DType, scope="shared.l0a") -> Buffer:

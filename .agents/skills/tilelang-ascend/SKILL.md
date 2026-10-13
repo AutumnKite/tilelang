@@ -268,12 +268,14 @@ buf_c = T.alloc_l0c((TILE_M, TILE_N), "float32")
 frag = T.alloc_fragment((TILE,), "float32")
 ```
 
-On dav-3510, `T.alloc_ss(shape, "uint32")` or `"uint64"` allocates volatile
+On dav-3510, `T.alloc_ss(shape, "uint32")` or `"uint64"` allocates
 scalar storage shared by one AIC and its two AIVs. For example,
 `words = T.alloc_ss((2,), "uint32")` can be read as one packed word through
 `T.view(words, shape=(1,), dtype="uint64")`. The group has a 3072-byte pool;
 allocation bases are aligned to 32 bytes and different allocations do not reuse
 storage. Shapes must be static and allocation does not initialize the contents.
+SS follows ordinary buffer optimization semantics; unused accesses may be
+removed. Publication and slot-reuse order come from synchronization.
 
 The two AIVs must write disjoint byte ranges. AIV/AIC dependencies use ordinary
 mode-4 synchronization, with each AIV tracked independently. Direct AIV peer

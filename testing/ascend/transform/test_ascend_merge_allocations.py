@@ -80,4 +80,3 @@ def test_ss_allocations_remain_disjoint_and_aligned_even_with_alias_contract():
     assert sorted(offsets) == [0, 32]
     allocations = nodes(after, tirx.AllocBuffer)
     assert len(allocations) == 1
-    assert allocations[0].annotations["tirx.volatile"]

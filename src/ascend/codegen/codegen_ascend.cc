@@ -151,6 +151,8 @@ bool IsAscendWarpReduceDType(DataType dtype) {
 }
 
 static std::string GetAscendScopeQualifier(const std::string &scope) {
+  // Keep scalar accesses volatile for the vendor compiler. SS accesses in
+  // TIR follow ordinary Buffer optimization and synchronization semantics.
   if (scope == "shared.ss" || scope == "shared.ss.dyn")
     return "volatile __ssbuf__";
   if (scope == "shared" || scope == "shared.dyn")

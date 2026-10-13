@@ -264,10 +264,7 @@ private:
                               {merged_alloc_size_}, {}, PrimExpr(),
                               merged_buf_var_->name_hint, 0, 0, tirx::kDefault);
       ffi::Array<tirx::Stmt> sequence;
-      ffi::Map<ffi::String, ffi::Any> annotations;
-      if (GetPtrStorageScope(merged_buf_var_) == "shared.ss.dyn")
-        annotations.Set(tirx::attr::kVolatile, Bool(true));
-      sequence.push_back(tirx::AllocBuffer(merged_buf, annotations));
+      sequence.push_back(tirx::AllocBuffer(merged_buf));
       sequence.push_back(tirx::StmtExprMutator::VisitStmt(op->body));
       return tirx::AttrStmt(op->node, op->attr_key, op->value,
                             tirx::SeqStmt(std::move(sequence)), op->span);

@@ -297,13 +297,6 @@ private:
   }
 
   void VisitStmt_(const SBlockNode *op) final {
-    if (auto annotation = op->annotations.Get(tl::attr::kVolatileBuffers)) {
-      for (const auto &[var, value] :
-           annotation.value().cast<Map<Var, PrimExpr>>()) {
-        if (!is_zero(value))
-          info_.volatile_buffers.insert(var);
-      }
-    }
     StmtExprVisitor::VisitStmt_(op);
     VisitObject_(op->iter_vars);
     VisitObject_(op->annotations);

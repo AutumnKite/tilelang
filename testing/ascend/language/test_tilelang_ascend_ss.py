@@ -32,11 +32,11 @@ def _publish_to_cube(rounds=8, stage=0):
     return main
 
 
-def test_ss_codegen_preserves_volatile_views_and_uses_mode4():
+def test_ss_codegen_emits_volatile_views_and_uses_mode4():
     source = tilelang.lower(_publish_to_cube(), target="ascend").kernel_source
     assert "volatile __ssbuf__" in source
     assert "(volatile __ssbuf__ uint32_t *)0" in source
-    assert "uint64_t" in source and "uint32_t" in source
+    assert re.search(r"volatile __ssbuf__ uint64_t\s*\*", source)
     assert "asc_sync_intra_wait(PIPE_S" in source
     assert "asc_sync_subblock" not in source
 

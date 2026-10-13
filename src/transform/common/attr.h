@@ -35,8 +35,6 @@ constexpr const char *kHasGridSync = "has_cuda_pdl_sync";
 
 // TileLang-only AttrStmt keys.
 constexpr const char *volatile_scope = "volatile_scope";
-// SBlock allocation data vars whose loads must retain volatile semantics.
-constexpr const char *kVolatileBuffers = "tl.volatile_buffers";
 constexpr const char *coproc_scope = "coproc_scope";
 constexpr const char *pipeline_exec_scope = "pipeline_exec_scope";
 // Marks user-authored assumptions that require a host runtime check. The
