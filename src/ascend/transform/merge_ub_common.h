@@ -75,6 +75,8 @@ inline bool IsScopeMemory(tirx::Var buffer_var,
 }
 
 inline int AscendScopeAlignBytes(const std::string &scope) {
+  if (scope == "shared.ss" || scope == "shared.ss.dyn")
+    return 32;
   if (scope == "shared.l0c" || scope == "shared.l0c.dyn")
     return 1024;
   if (scope == "shared.l1" || scope == "shared.l1.dyn" ||
@@ -152,7 +154,8 @@ public:
     } else {
       std::string scope = GetPtrStorageScope(op->buffer->data);
       for (const std::string &candidate :
-           {"shared.l0a", "shared.l0b", "shared.l0c", "shared.l1"}) {
+           {"shared.l0a", "shared.l0b", "shared.l0c", "shared.l1",
+            "shared.ss"}) {
         if (scope != candidate)
           continue;
         const tirx::VarNode *key = op->buffer->data.get();
@@ -261,7 +264,10 @@ private:
                               {merged_alloc_size_}, {}, PrimExpr(),
                               merged_buf_var_->name_hint, 0, 0, tirx::kDefault);
       ffi::Array<tirx::Stmt> sequence;
-      sequence.push_back(tirx::AllocBuffer(merged_buf));
+      ffi::Map<ffi::String, ffi::Any> annotations;
+      if (GetPtrStorageScope(merged_buf_var_) == "shared.ss.dyn")
+        annotations.Set(tirx::attr::kVolatile, Bool(true));
+      sequence.push_back(tirx::AllocBuffer(merged_buf, annotations));
       sequence.push_back(tirx::StmtExprMutator::VisitStmt(op->body));
       return tirx::AttrStmt(op->node, op->attr_key, op->value,
                             tirx::SeqStmt(std::move(sequence)), op->span);
@@ -415,7 +421,7 @@ tirx::Stmt MergeAllocations(tirx::Stmt stmt, int align_bytes, bool verbose,
                  const AllocationMap &allocations,
                  const AllocationOrder &allocation_order,
                  const std::string &target_scope) {
-    if (disable_reuse) {
+    if (disable_reuse || target_scope == "shared.ss") {
       rewriter.PlanNoReuse();
     } else {
       rewriter.SetPlan(planner(stmt, allocations, allocation_order,

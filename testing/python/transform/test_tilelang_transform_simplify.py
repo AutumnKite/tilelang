@@ -799,7 +799,7 @@ def test_simplify_keeps_bind_with_side_effects(make_value):
     simplify_and_compare(mod_before, mod_expected)
 
 
-@pytest.mark.parametrize("annotation", ["volatile_scope", "tirx.volatile"])
+@pytest.mark.parametrize("annotation", ["volatile_scope", "tirx.volatile", "tl.volatile_buffers", "tl.volatile_buffers.lowered"])
 def test_simplify_keeps_bind_reading_volatile_buffer(annotation):
     """A read through an alias still observes the original buffer's volatility."""
     A = tirx.decl_buffer((1,), "float32", scope="local")
@@ -809,9 +809,14 @@ def test_simplify_keeps_bind_reading_volatile_buffer(annotation):
     def wrap_volatile(body):
         if annotation == "volatile_scope":
             body = tirx.AttrStmt(A.data, "volatile_scope", 1, body)
+        elif annotation.startswith("tl.volatile_buffers"):
+            body = tirx.SBlockRealize(
+                [], True, tirx.SBlock([], [], [], "root", body, alloc_buffers=[A], annotations={"tl.volatile_buffers": {A.data: True}})
+            )
         else:
             body = tirx.SeqStmt([tirx.AllocBuffer(A, annotations={"tirx.volatile": True}), body])
-        return tvm.IRModule.from_expr(tirx.PrimFunc([], body))
+        mod = tvm.IRModule.from_expr(tirx.PrimFunc([], body))
+        return tl.transform.LowerOpaqueBlock()(mod) if annotation.endswith(".lowered") else mod
 
     volatile_read = tirx.Bind(value, alias[0])
     unused_consumer = tirx.Bind(tirx.Var("unused", "float32"), value + 1.0)
